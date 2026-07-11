@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+httpx
+feedparser
+beautifulsoup4
+sqlmodel
+apscheduler
+trafilatura

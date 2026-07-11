@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BlogReader · 博客阅读器</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    // MathJax v3：手动 typeset 模式。inlineMath 支持 $...$ 与 \(...\)，
+    // display 支持 $$...$$ 与 \[...\]。跳过 code/pre，避免把代码里的 $ 当公式。
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true,
+      },
+      options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+      },
+      startup: { typeset: false },  // 内容异步渲染，由前端在 nextTick 手动 typeset
+    };
+  </script>
+  <script async src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f7f7f8; --panel: #fff; --border: #e5e5e8; --text: #1a1a1a;
+      --muted: #8a8a92; --accent: #2f6feb; --accent-soft: #eaf1ff; --unread-dot: #2f6feb;
+    }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
+    }
+    #app { display: flex; height: 100vh; overflow: hidden; }
+
+    /* 左栏：订阅列表 */
+    .col-feeds { width: 260px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .col-list { width: 360px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .col-reader { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .col-head h1 { font-size: 15px; font-weight: 600; }
+    .col-head .sub { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+    .scroll { overflow-y: auto; flex: 1; }
+
+    /* 加订阅表单 */
+    .add-form { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+    .add-form input { flex: 1; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+    .add-form input:focus { outline: none; border-color: var(--accent); }
+    .btn { padding: 7px 12px; border: none; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; white-space: nowrap; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+    .btn.mini { padding: 3px 8px; font-size: 12px; }
+
+    /* 订阅项 */
+    .feed-item { padding: 10px 16px; cursor: pointer; border-bottom: 1px solid #f0f0f2; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .feed-item:hover { background: #fafafc; }
+    .feed-item.active { background: var(--accent-soft); }
+    .feed-item .fi-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feed-item .fi-meta { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+    .feed-item .badge { background: var(--accent); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 11px; }
+    .feed-item .err { color: #d33; }
+    .feed-item .del { opacity: 0; color: var(--muted); font-size: 16px; border: none; background: none; cursor: pointer; }
+    .feed-item:hover .del { opacity: 1; }
+    .feed-left { min-width: 0; flex: 1; }
+
+    /* 过滤 tab */
+    .filters { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    .filters button { flex: 1; padding: 6px; border: none; background: transparent; border-radius: 6px; cursor: pointer; color: var(--muted); font-size: 13px; }
+    .filters button.on { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+
+    /* 文章项 */
+    .art-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #f0f0f2; }
+    .art-item:hover { background: #fafafc; }
+    .art-item.active { background: var(--accent-soft); }
+    .art-item .ai-title { font-weight: 500; margin-bottom: 3px; display: flex; align-items: baseline; gap: 6px; }
+    .art-item.unread .ai-title::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--unread-dot); flex-shrink: 0; display: inline-block; }
+    .art-item.read .ai-title { color: var(--muted); font-weight: 400; }
+    .art-item .ai-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; }
+    .art-item .star { margin-left: auto; }
+    .star-btn { border: none; background: none; cursor: pointer; font-size: 15px; color: #ccc; }
+    .star-btn.on { color: #f5b301; }
+
+    /* 阅读区 */
+    .reader-body { padding: 28px 40px; overflow-y: auto; flex: 1; max-width: 820px; }
+    .reader-body h2 { font-size: 24px; margin-bottom: 10px; line-height: 1.3; }
+    .reader-meta { color: var(--muted); font-size: 13px; margin-bottom: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .reader-content { font-size: 15px; line-height: 1.75; word-wrap: break-word; }
+    .reader-content img { max-width: 100%; height: auto; }
+    .reader-content pre { background: #f4f4f6; padding: 12px; border-radius: 6px; overflow-x: auto; }
+    .reader-content :not(pre) > code { background: #f0f0f2; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #c0341d; word-break: break-word; }
+    .reader-content table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; display: block; overflow-x: auto; }
+    .reader-content th, .reader-content td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+    .reader-content th { background: #f4f4f6; font-weight: 600; }
+    .reader-content tr:nth-child(even) td { background: #fafafb; }
+    .reader-content a { color: var(--accent); }
+    .reader-content p { margin: 12px 0; }
+    .reader-toolbar { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
+
+    .empty { color: var(--muted); text-align: center; padding: 48px 20px; font-size: 13px; }
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1a1a1a; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; z-index: 100; opacity: .95; }
+    .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid #ccc; border-top-color: var(--accent); border-radius: 50%; animation: r 0.7s linear infinite; vertical-align: middle; }
+    @keyframes r { to { transform: rotate(360deg); } }
+
+    /* 翻译：段落对照译文 */
+    .tr-group { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+    .tr-lang { font-size: 12px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #333; }
+    .reader-content .tr-trans { margin: 4px 0 12px; padding: 8px 12px; border-left: 3px solid var(--accent); background: #f6f9ff; color: #1a3a5c; font-size: 14px; line-height: 1.7; border-radius: 0 6px 6px 0; }
+    .reader-content .tr-trans.tr-pending { color: var(--muted); font-style: italic; border-left-color: #ccc; background: #f7f7f8; }
+
+    /* 设置弹窗 */
+    .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; z-index: 200; }
+    .modal { background: #fff; width: 420px; max-width: calc(100vw - 32px); border-radius: 12px; padding: 22px 24px; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+    .modal h3 { margin: 0 0 6px; font-size: 17px; }
+    .modal-hint { margin: 0 0 14px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+    .modal label { display: block; font-size: 12px; color: #555; margin: 12px 0 4px; font-weight: 600; }
+    .modal input, .modal select { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: #fff; }
+    .modal-msg { margin-top: 12px; font-size: 12px; padding: 8px 10px; border-radius: 6px; line-height: 1.5; }
+    .modal-msg.ok { background: #eaf7ee; color: #1c7a3e; }
+    .modal-msg.err { background: #fdecec; color: #c0341d; }
+    .modal-actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 左栏：订阅源 -->
+    <div class="col-feeds">
+      <div class="col-head">
+        <h1>订阅源</h1>
+        <div style="display:flex; gap:6px;">
+          <button class="btn ghost mini" @click="openSettings" title="翻译设置">⚙</button>
+          <button class="btn ghost mini" @click="refreshAll" :disabled="refreshing">
+            <span v-if="refreshing" class="spin"></span><span v-else>刷新</span>
+          </button>
+        </div>
+      </div>
+      <div class="add-form">
+        <input v-model="newUrl" @keyup.enter="addFeed" placeholder="博客网址 或 RSS 链接" :disabled="adding" />
+        <button class="btn" @click="addFeed" :disabled="adding || !newUrl.trim()">
+          <span v-if="adding" class="spin"></span><span v-else>+</span>
+        </button>
+      </div>
+      <div class="scroll">
+        <div class="feed-item" :class="{ active: selectedFeed === null }" @click="selectFeed(null)">
+          <div class="feed-left"><div class="fi-title">全部文章</div></div>
+          <span class="badge" v-if="totalUnread > 0">{{ totalUnread }}</span>
+        </div>
+        <div v-for="f in feeds" :key="f.id" class="feed-item" :class="{ active: selectedFeed === f.id }" @click="selectFeed(f.id)">
+          <div class="feed-left">
+            <div class="fi-title">{{ f.title }}</div>
+            <div class="fi-meta">
+              <span>{{ f.total }} 篇</span>
+              <span v-if="f.last_status === 'error'" class="err" :title="f.last_error">抓取失败</span>
+            </div>
+          </div>
+          <span class="badge" v-if="f.unread > 0">{{ f.unread }}</span>
+          <button class="del" @click.stop="delFeed(f)" title="删除订阅">×</button>
+        </div>
+        <div class="empty" v-if="feeds.length === 0">还没有订阅源。<br />在上方粘贴一个博客网址开始。</div>
+      </div>
+    </div>
+
+    <!-- 中栏：文章列表 -->
+    <div class="col-list">
+      <div class="col-head">
+        <h1>{{ currentFeedTitle }}</h1>
+      </div>
+      <div class="filters">
+        <button :class="{ on: filter === 'all' }" @click="setFilter('all')">全部</button>
+        <button :class="{ on: filter === 'unread' }" @click="setFilter('unread')">未读</button>
+        <button :class="{ on: filter === 'starred' }" @click="setFilter('starred')">星标</button>
+      </div>
+      <div class="scroll">
+        <div v-for="a in articles" :key="a.id" class="art-item"
+             :class="{ active: current && current.id === a.id, unread: !a.is_read, read: a.is_read }"
+             @click="openArticle(a)">
+          <div class="ai-title">
+            <span>{{ a.title }}</span>
+            <button class="star-btn star" :class="{ on: a.is_starred }" @click.stop="toggleStar(a)">★</button>
+          </div>
+          <div class="ai-meta">
+            <span v-if="selectedFeed === null">{{ a.feed_title }}</span>
+            <span>{{ fmtDate(a.published_at) }}</span>
+          </div>
+        </div>
+        <div class="empty" v-if="articles.length === 0 && !loadingList">没有文章。</div>
+        <div class="empty" v-if="loadingList"><span class="spin"></span> 加载中</div>
+      </div>
+    </div>
+
+    <!-- 右栏：正文 -->
+    <div class="col-reader">
+      <div v-if="current">
+        <div class="reader-toolbar">
+          <button class="btn ghost mini" @click="toggleRead(current)">
+            {{ current.is_read ? '标为未读' : '标为已读' }}
+          </button>
+          <button class="btn ghost mini star-btn" :class="{ on: current.is_starred }" @click="toggleStar(current)">
+            {{ current.is_starred ? '★ 已星标' : '☆ 星标' }}
+          </button>
+          <a class="btn ghost mini" :href="current.link" target="_blank" rel="noopener">原文 ↗</a>
+          <span class="tr-group">
+            <select class="tr-lang" v-model="targetLang" :disabled="translating">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+              <option value="ko">한국어</option>
+              <option value="fr">Français</option>
+              <option value="de">Deutsch</option>
+              <option value="es">Español</option>
+              <option value="ru">Русский</option>
+            </select>
+            <button class="btn ghost mini" @click="toggleTranslate" :disabled="translating">
+              <span v-if="translating" class="spin"></span>
+              <span v-else>{{ translated ? '隐藏译文' : '翻译' }}</span>
+            </button>
+          </span>
+        </div>
+      </div>
+      <div class="reader-body" v-if="current">
+        <h2>{{ current.title }}</h2>
+        <div class="reader-meta">
+          <span v-if="current.author">{{ current.author }}</span>
+          <span>{{ fmtDate(current.published_at) }}</span>
+        </div>
+        <div class="reader-content" v-html="current.content"></div>
+      </div>
+      <div class="empty" v-else style="margin: auto;">选择一篇文章开始阅读</div>
+    </div>
+
+    <!-- 翻译设置弹窗 -->
+    <div class="modal-mask" v-if="showSettings">
+      <div class="modal">
+        <h3>翻译设置</h3>
+        <p class="modal-hint">配置一个 OpenAI 或 Anthropic 规范的接口用于翻译。密钥仅保存在本地，页面不会回显。</p>
+        <label>接口规范</label>
+        <select v-model="settings.api_type">
+          <option value="openai">OpenAI 兼容（/chat/completions）</option>
+          <option value="anthropic">Anthropic（/v1/messages）</option>
+        </select>
+        <label>Base URL</label>
+        <input v-model="settings.base_url"
+               :placeholder="settings.api_type==='anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'" />
+        <label>API Key</label>
+        <input type="password" v-model="settings.api_key"
+               :placeholder="settings.has_key ? '已配置（留空则不修改）' : 'sk-...'" />
+        <label>模型</label>
+        <input v-model="settings.model"
+               :placeholder="settings.api_type==='anthropic' ? 'claude-3-5-sonnet-latest' : 'gpt-4o-mini'" />
+        <div class="modal-msg" v-if="settingsMsg" :class="settingsMsgOk ? 'ok' : 'err'">{{ settingsMsg }}</div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="testSettings" :disabled="savingSettings">
+            <span v-if="savingSettings==='test'" class="spin"></span><span v-else>测试连接</span>
+          </button>
+          <span style="flex:1"></span>
+          <button class="btn ghost" @click="showSettings=false">取消</button>
+          <button class="btn" @click="saveSettings" :disabled="savingSettings">
+            <span v-if="savingSettings==='save'" class="spin"></span><span v-else>保存</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" v-if="toast">{{ toast }}</div>
+  </div>
+
+  <script>
+    const { createApp } = Vue;
+    createApp({
+      data() {
+        return {
+          feeds: [], articles: [], current: null,
+          selectedFeed: null, filter: 'all',
+          newUrl: '', adding: false, refreshing: false, loadingList: false,
+          toast: '', _toastTimer: null,
+          // 翻译
+          targetLang: 'zh', translating: false, translated: false, trHidden: false,
+          // 设置弹窗
+          showSettings: false, savingSettings: false,
+          settingsMsg: '', settingsMsgOk: false,
+          settings: { api_type: 'openai', base_url: '', api_key: '', model: '', has_key: false },
+        };
+      },
+      computed: {
+        totalUnread() { return this.feeds.reduce((s, f) => s + (f.unread || 0), 0); },
+        currentFeedTitle() {
+          if (this.selectedFeed === null) return '全部文章';
+          const f = this.feeds.find(x => x.id === this.selectedFeed);
+          return f ? f.title : '文章';
+        },
+      },
+      methods: {
+        async api(path, opts) {
+          const r = await fetch('/api' + path, opts);
+          if (!r.ok) {
+            let msg = r.statusText;
+            try { const j = await r.json(); msg = j.detail || msg; } catch (e) {}
+            throw new Error(msg);
+          }
+          return r.status === 204 ? null : r.json();
+        },
+        showToast(msg) {
+          this.toast = msg;
+          clearTimeout(this._toastTimer);
+          this._toastTimer = setTimeout(() => { this.toast = ''; }, 2600);
+        },
+        fmtDate(iso) {
+          if (!iso) return '';
+          const d = new Date(iso);
+          if (isNaN(d)) return '';
+          return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' });
+        },
+        async loadFeeds() {
+          try { this.feeds = await this.api('/feeds'); }
+          catch (e) { this.showToast('加载订阅失败：' + e.message); }
+        },
+        async loadArticles() {
+          this.loadingList = true;
+          try {
+            let q = '?filter=' + this.filter + '&limit=200';
+            if (this.selectedFeed !== null) q += '&feed_id=' + this.selectedFeed;
+            this.articles = await this.api('/articles' + q);
+          } catch (e) { this.showToast('加载文章失败：' + e.message); }
+          finally { this.loadingList = false; }
+        },
+        selectFeed(id) { this.selectedFeed = id; this.loadArticles(); },
+        setFilter(f) { this.filter = f; this.loadArticles(); },
+        async addFeed() {
+          const url = this.newUrl.trim();
+          if (!url) return;
+          this.adding = true;
+          try {
+            const res = await this.api('/feeds', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url }),
+            });
+            this.newUrl = '';
+            this.showToast(res.message || '订阅成功');
+            await this.loadFeeds();
+            await this.loadArticles();
+          } catch (e) { this.showToast('订阅失败：' + e.message); }
+          finally { this.adding = false; }
+        },
+        async delFeed(f) {
+          if (!confirm('删除订阅「' + f.title + '」及其所有文章？')) return;
+          try {
+            await this.api('/feeds/' + f.id, { method: 'DELETE' });
+            if (this.selectedFeed === f.id) this.selectFeed(null);
+            await this.loadFeeds();
+            await this.loadArticles();
+            this.showToast('已删除');
+          } catch (e) { this.showToast('删除失败：' + e.message); }
+        },
+        async refreshAll() {
+          this.refreshing = true;
+          try {
+            const res = await this.api('/refresh', { method: 'POST' });
+            const n = (res.results || []).reduce((s, r) => s + (r.new || 0), 0);
+            this.showToast('刷新完成，新增 ' + n + ' 篇');
+            await this.loadFeeds();
+            await this.loadArticles();
+          } catch (e) { this.showToast('刷新失败：' + e.message); }
+          finally { this.refreshing = false; }
+        },
+        async openArticle(a) {
+          try {
+            this.current = await this.api('/articles/' + a.id);
+            this.resetTranslation();
+            this.$nextTick(() => this._prepareContent());
+            if (!a.is_read) await this.markRead(a, true);
+          } catch (e) { this.showToast('打开失败：' + e.message); }
+        },
+        async markRead(a, val) {
+          try {
+            await this.api('/articles/' + a.id + '/read', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_read: val }),
+            });
+            a.is_read = val;
+            if (this.current && this.current.id === a.id) this.current.is_read = val;
+            this.patchFeedUnread(a.feed_id, val ? -1 : 1);
+            if (this.filter !== 'all') this.loadArticles();
+          } catch (e) { this.showToast('操作失败：' + e.message); }
+        },
+        toggleRead(a) { this.markRead(a, !a.is_read); },
+        async toggleStar(a) {
+          const val = !a.is_starred;
+          try {
+            await this.api('/articles/' + a.id + '/star', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_starred: val }),
+            });
+            a.is_starred = val;
+            // 同步列表和详情两处状态
+            const inList = this.articles.find(x => x.id === a.id);
+            if (inList) inList.is_starred = val;
+            if (this.current && this.current.id === a.id) this.current.is_starred = val;
+            if (this.filter === 'starred') this.loadArticles();
+          } catch (e) { this.showToast('操作失败：' + e.message); }
+        },
+        patchFeedUnread(feedId, delta) {
+          const f = this.feeds.find(x => x.id === feedId);
+          if (f) f.unread = Math.max(0, (f.unread || 0) + delta);
+        },
+
+        // ---------- 翻译设置 ----------
+        async openSettings() {
+          this.settingsMsg = '';
+          try {
+            const s = await this.api('/settings');
+            this.settings = { api_type: s.api_type, base_url: s.base_url, api_key: '', model: s.model, has_key: s.has_key };
+          } catch (e) { this.showToast('读取设置失败：' + e.message); }
+          this.showSettings = true;
+        },
+        _settingsBody() {
+          return JSON.stringify({
+            api_type: this.settings.api_type,
+            base_url: this.settings.base_url.trim(),
+            api_key: this.settings.api_key,   // 留空表示不改
+            model: this.settings.model.trim(),
+          });
+        },
+        async saveSettings() {
+          this.savingSettings = 'save'; this.settingsMsg = '';
+          try {
+            const s = await this.api('/settings', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: this._settingsBody(),
+            });
+            this.settings.api_key = '';
+            this.settings.has_key = s.has_key;
+            this.showSettings = false;
+            this.showToast('设置已保存');
+          } catch (e) { this.settingsMsg = '保存失败：' + e.message; this.settingsMsgOk = false; }
+          finally { this.savingSettings = false; }
+        },
+        async testSettings() {
+          this.savingSettings = 'test'; this.settingsMsg = '';
+          try {
+            const r = await this.api('/settings/test', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: this._settingsBody(),
+            });
+            this.settingsMsg = '连接成功：' + (r.reply || 'OK');
+            this.settingsMsgOk = true;
+          } catch (e) { this.settingsMsg = '连接失败：' + e.message; this.settingsMsgOk = false; }
+          finally { this.savingSettings = false; }
+        },
+
+        // ---------- 分段对照翻译 ----------
+        resetTranslation() {
+          this.translated = false;
+          this.translating = false;
+          this.trHidden = false;
+          // 停止懒加载观察器（切换文章/内容重渲染）
+          if (this._trObserver) { this._trObserver.disconnect(); this._trObserver = null; }
+          if (this._trTimer) { clearTimeout(this._trTimer); this._trTimer = null; }
+          if (this._stopTrScroll) this._stopTrScroll();
+          this._trQueue = [];
+          // 内容重新渲染时旧译文节点自然消失，无需手动清理
+        },
+        // 文章渲染后：先把每个可翻译块的原始纯文本快照到 data-tr-src（供翻译读取），
+        // 再让 MathJax typeset。顺序关键：typeset 会把 $...$ 文本节点替换成渲染后的
+        // <mjx-container>，之后 textContent 里就没有 LaTeX 源码了，翻译会拿到乱码。
+        _prepareContent() {
+          const root = document.querySelector('.reader-content');
+          if (!root) return;
+          this._collectBlocks().forEach(b => {
+            b.dataset.trSrc = b.textContent.trim();
+          });
+          this._typesetMath(root);
+        },
+        // 等 MathJax 就绪后 typeset 指定容器（异步 CDN，可能尚未加载完，轮询等待）
+        _typesetMath(el) {
+          if (!el) return;
+          const run = () => {
+            if (window.MathJax && window.MathJax.typesetPromise) {
+              window.MathJax.typesetPromise([el]).catch(() => {});
+            } else {
+              setTimeout(run, 120);
+            }
+          };
+          run();
+        },
+        _collectBlocks() {
+          const root = document.querySelector('.reader-content');
+          if (!root) return [];
+          const sel = 'p, li, blockquote, h1, h2, h3, h4, h5, h6, pre, td';
+          const all = Array.from(root.querySelectorAll(sel));
+          // 只留最外层块（跳过被其它候选块包含的），且含实际文字
+          return all.filter(el =>
+            !all.some(o => o !== el && o.contains(el)) &&
+            el.textContent.trim().length > 0
+          );
+        },
+        // 某块是否已插入译文
+        _hasTrans(el) {
+          return !!(el.nextElementSibling && el.nextElementSibling.classList.contains('tr-trans'));
+        },
+        // 启动/重启视口懒加载观察器：滚动到可见（含预取余量）才翻译
+        _startTrObserver() {
+          if (this._trObserver) this._trObserver.disconnect();
+          this._trQueue = this._trQueue || [];
+          this._trObserver = new IntersectionObserver((entries) => {
+            let added = false;
+            for (const en of entries) {
+              if (!en.isIntersecting) continue;
+              this._trObserver.unobserve(en.target);
+              if (this._hasTrans(en.target)) continue;
+              this._trQueue.push(en.target);
+              added = true;
+            }
+            if (added) {
+              clearTimeout(this._trTimer);
+              // 防抖 250ms：把先后进入视口的块合并成一批请求
+              this._trTimer = setTimeout(() => this._flushTrQueue(), 250);
+            }
+          }, { rootMargin: '400px 0px', threshold: 0.01 });
+          // 只观察尚未翻译的块
+          this._collectBlocks().forEach(b => {
+            if (!this._hasTrans(b)) this._trObserver.observe(b);
+          });
+          // 立即扫描当前视口（含预取余量），不等 IO 异步回调，保证首屏即时翻译
+          this._scanViewport();
+          // 兜底：滚动/缩放时同步扫描视口。IntersectionObserver 在后台标签页会被节流，
+          // 该监听保证滚动到的段落总能及时翻译（节流 200ms）。
+          if (!this._trScrollHandler) {
+            this._trScrollHandler = () => {
+              clearTimeout(this._trScrollTimer);
+              this._trScrollTimer = setTimeout(() => this._scanViewport(), 200);
+            };
+          }
+          window.addEventListener('scroll', this._trScrollHandler, true);
+          window.addEventListener('resize', this._trScrollHandler);
+        },
+        _stopTrScroll() {
+          if (this._trScrollHandler) {
+            window.removeEventListener('scroll', this._trScrollHandler, true);
+            window.removeEventListener('resize', this._trScrollHandler);
+          }
+          clearTimeout(this._trScrollTimer);
+        },
+        // 同步扫描当前视口内（含 margin 预取）尚未翻译的块，入队并触发翻译
+        _scanViewport() {
+          const margin = 400;
+          const vh = window.innerHeight || document.documentElement.clientHeight;
+          this._trQueue = this._trQueue || [];
+          let added = false;
+          this._collectBlocks().forEach(b => {
+            if (this._hasTrans(b) || this._trQueue.includes(b)) return;
+            const r = b.getBoundingClientRect();
+            if (r.top < vh + margin && r.bottom > -margin) {
+              if (this._trObserver) this._trObserver.unobserve(b);
+              this._trQueue.push(b);
+              added = true;
+            }
+          });
+          if (added) {
+            clearTimeout(this._trTimer);
+            this._trTimer = setTimeout(() => this._flushTrQueue(), 150);
+          }
+        },
+        // 批量翻译当前排队的块并插入对照译文
+        async _flushTrQueue() {
+          if (!this._trQueue || !this._trQueue.length) return;
+          const blocks = this._trQueue.filter(b => b.isConnected && !this._hasTrans(b));
+          this._trQueue = [];
+          if (!blocks.length) return;
+          const segments = blocks.map(b => (b.dataset.trSrc || b.textContent).trim());
+          this.translating = true;
+          try {
+            const res = await this.api('/translate', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ segments, target_lang: this.targetLang }),
+            });
+            const trans = res.translations || [];
+            blocks.forEach((b, i) => {
+              const t = (trans[i] || '').trim();
+              if (!t || t === segments[i] || this._hasTrans(b)) return;
+              const div = document.createElement('div');
+              div.className = 'tr-trans';
+              div.textContent = t;
+              if (this.trHidden) div.style.display = 'none';
+              b.insertAdjacentElement('afterend', div);
+              // 译文里可能含 $...$ 公式（原文 LaTeX 被保留下来），同样渲染
+              if (/[$\\]/.test(t)) this._typesetMath(div);
+            });
+          } catch (e) { this.showToast('翻译失败：' + e.message); }
+          finally { this.translating = false; }
+        },
+        toggleTranslate() {
+          // 已开启：切换译文显隐；隐藏时停止懒加载，显示时恢复
+          if (this.translated) {
+            this.trHidden = !this.trHidden;
+            document.querySelectorAll('.reader-content .tr-trans')
+              .forEach(n => n.style.display = this.trHidden ? 'none' : '');
+            if (this.trHidden) {
+              if (this._trObserver) { this._trObserver.disconnect(); this._trObserver = null; }
+              if (this._trTimer) { clearTimeout(this._trTimer); this._trTimer = null; }
+              if (this._stopTrScroll) this._stopTrScroll();
+              this._trQueue = [];
+            } else {
+              this._startTrObserver();
+            }
+            return;
+          }
+          // 首次开启：进入懒加载模式，仅翻译滚动到视口内的段落
+          if (!this._collectBlocks().length) { this.showToast('没有可翻译的正文'); return; }
+          this.translated = true;
+          this.trHidden = false;
+          this._trQueue = [];
+          this._startTrObserver();
+        },
+      },
+      async mounted() {
+        await this.loadFeeds();
+        await this.loadArticles();
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>
