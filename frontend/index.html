@@ -693,7 +693,21 @@
         // ---------- AI 对话 ----------
         toggleChat() {
           this.chatOpen = !this.chatOpen;
-          if (this.chatOpen) this._scrollChat();
+          if (this.chatOpen) {
+            // 打开面板时，若此前有划词，自动带入为引用，避免用户点击输入框后选区被清除而丢失。
+            // 优先读实时选区（点击 header 按钮通常不会清除高亮），为空再回退到 fab 缓存的文字。
+            const content = document.querySelector('.reader-content');
+            const sel = window.getSelection();
+            let text = sel ? sel.toString().trim() : '';
+            if (text && sel.rangeCount && content &&
+                content.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+              this.chatSelection = text;
+            } else if (this.selFab.show && this.selFab.text) {
+              this.chatSelection = this.selFab.text;
+            }
+            this.selFab.show = false;
+            this._scrollChat();
+          }
         },
         async loadConversations(selectId) {
           if (!this.current) return;
