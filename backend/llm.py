@@ -145,6 +145,95 @@ def chat(messages: list[dict], system: str = "", cfg: Optional[dict] = None,
         raise LLMError(f"解析接口响应失败：{e}；原始：{json.dumps(data)[:300]}") from e
 
 
+def chat_stream(messages: list[dict], system: str = "", cfg: Optional[dict] = None,
+                max_tokens: int = 2048, temperature: float = 0.3, timeout: float = 180.0):
+    """流式聊天：按配置的 api_type 分派，逐块 yield 文本增量（str）。
+
+    与 :func:`chat` 同构，但请求体带 ``stream: true``，用 SSE 解析增量：
+    - openai:    每行 ``data: {json}``，取 choices[0].delta.content
+    - anthropic: 事件流，取 content_block_delta 里的 delta.text
+    出错时抛 :class:`LLMError`（生成器首次迭代时才会真正发起请求）。
+    """
+    cfg = cfg or get_config()
+    if not is_configured(cfg):
+        raise LLMError("尚未配置模型接口，请先在设置里填写 base_url / api_key / model。")
+
+    api_type = (cfg.get("api_type") or "openai").lower()
+    base = _normalize_base(cfg["base_url"])
+    key = cfg["api_key"]
+    model = cfg["model"]
+
+    if api_type == "anthropic":
+        url = f"{base}/v1/messages"
+        headers = {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": messages,
+            "stream": True,
+        }
+        if system:
+            payload["system"] = system
+    else:  # openai 兼容
+        url = f"{base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "content-type": "application/json",
+        }
+        msgs = ([{"role": "system", "content": system}] if system else []) + messages
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": msgs,
+            "stream": True,
+        }
+
+    def _gen():
+        try:
+            with httpx.stream("POST", url, headers=headers, json=payload, timeout=timeout) as resp:
+                if resp.status_code >= 400:
+                    detail = resp.read().decode("utf-8", "replace")[:500]
+                    raise LLMError(f"接口返回 {resp.status_code}：{detail}")
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if not data_str or data_str == "[DONE]":
+                        if data_str == "[DONE]":
+                            break
+                        continue
+                    try:
+                        evt = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    if api_type == "anthropic":
+                        if evt.get("type") == "content_block_delta":
+                            piece = (evt.get("delta") or {}).get("text", "")
+                            if piece:
+                                yield piece
+                        elif evt.get("type") == "message_stop":
+                            break
+                    else:
+                        choices = evt.get("choices") or []
+                        if choices:
+                            piece = (choices[0].get("delta") or {}).get("content", "")
+                            if piece:
+                                yield piece
+        except httpx.HTTPError as e:
+            raise LLMError(f"请求接口失败：{e}") from e
+
+    return _gen()
+
+
 # ---------- 翻译 ----------
 _LANG_NAMES = {
     "zh": "简体中文", "zh-Hant": "繁體中文", "en": "English", "ja": "日本語",

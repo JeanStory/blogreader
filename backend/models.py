@@ -57,3 +57,28 @@ class Setting(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str = ""
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Conversation(SQLModel, table=True):
+    """一篇文章下的一次 AI 对话会话。
+
+    一篇文章可有多个会话（多对话需求）。删除会话时需一并删除其消息（应用层处理）。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    article_id: int = Field(index=True, foreign_key="article.id")
+    title: str = ""  # 会话标题，默认取首条用户消息前若干字
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class ChatMessage(SQLModel, table=True):
+    """一条对话消息。role=user|assistant。
+
+    quote 存划词引用片段（可选），与 content 分开存便于前端独立渲染引用块。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    conversation_id: int = Field(index=True, foreign_key="conversation.id")
+    role: str = ""      # user | assistant
+    content: str = ""
+    quote: str = ""     # 划词引用片段（可选）
+    created_at: datetime = Field(default_factory=datetime.utcnow)
