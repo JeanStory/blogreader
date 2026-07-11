@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -17,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, or_, col
 
 from backend.db import engine, init_db
 from backend.models import Feed, Article, Conversation, ChatMessage
@@ -157,6 +158,60 @@ def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int
             "title": a.title, "link": a.link, "author": a.author,
             "summary": a.summary, "published_at": a.published_at.isoformat() if a.published_at else None,
             "is_read": a.is_read, "is_starred": a.is_starred,
+        } for a in arts]
+
+
+@app.get("/api/search")
+def search_articles(q: str, feed_id: Optional[int] = None, limit: int = 100):
+    """搜索文章：标题 / 摘要 / 正文任一命中即返回（不区分大小写）。
+
+    q 为空则返回空列表。feed_id 存在时限定该源内搜索，否则全局搜索。
+    额外返回 snippet：正文中命中关键词的一小段上下文，便于用户快速判断。
+    """
+    kw = (q or "").strip()
+    if not kw:
+        return []
+    like = f"%{kw}%"
+    with Session(engine) as s:
+        query = select(Article).where(
+            or_(
+                col(Article.title).ilike(like),
+                col(Article.summary).ilike(like),
+                col(Article.content).ilike(like),
+            )
+        )
+        if feed_id is not None:
+            query = query.where(Article.feed_id == feed_id)
+        query = query.order_by(Article.published_at.desc().nullslast()).limit(limit)
+        arts = s.exec(query).all()
+        feed_titles = {f.id: (f.title or f.site_url) for f in s.exec(select(Feed)).all()}
+
+        def make_snippet(a: Article) -> str:
+            # 优先从正文/摘要里截取命中关键词附近的一段文本
+            source = a.content or a.summary or ""
+            if not source:
+                return ""
+            low = source.lower()
+            pos = low.find(kw.lower())
+            if pos < 0:
+                # 命中在标题里，取正文开头
+                text = source[:120]
+            else:
+                start = max(0, pos - 40)
+                text = source[start:pos + len(kw) + 80]
+            # 去掉可能残留的 HTML 标签与多余空白
+            text = re.sub(r"<[^>]+>", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) > 160:
+                text = text[:160] + "…"
+            return text
+
+        return [{
+            "id": a.id, "feed_id": a.feed_id, "feed_title": feed_titles.get(a.feed_id, ""),
+            "title": a.title, "link": a.link, "author": a.author,
+            "summary": a.summary, "published_at": a.published_at.isoformat() if a.published_at else None,
+            "is_read": a.is_read, "is_starred": a.is_starred,
+            "snippet": make_snippet(a),
         } for a in arts]
 
 

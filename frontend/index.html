@@ -79,6 +79,10 @@
     .art-item.unread .ai-title::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--unread-dot); flex-shrink: 0; display: inline-block; }
     .art-item.read .ai-title { color: var(--muted); font-weight: 400; }
     .art-item .ai-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; }
+    .search-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    .search-bar input { flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; }
+    .search-bar input:focus { border-color: var(--accent); }
+    .art-item .ai-snippet { font-size: 12px; color: var(--muted); margin: 2px 0 4px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .art-item .star { margin-left: auto; }
     .star-btn { border: none; background: none; cursor: pointer; font-size: 15px; color: #ccc; }
     .star-btn.on { color: #f5b301; }
@@ -170,9 +174,12 @@
         </button>
       </div>
       <div class="scroll">
-        <div class="feed-item" :class="{ active: selectedFeed === null }" @click="selectFeed(null)">
+        <div class="feed-item" :class="{ active: !starredView && selectedFeed === null }" @click="selectFeed(null)">
           <div class="feed-left"><div class="fi-title">全部文章</div></div>
           <span class="badge" v-if="totalUnread > 0">{{ totalUnread }}</span>
+        </div>
+        <div class="feed-item" :class="{ active: starredView }" @click="selectStarred()">
+          <div class="feed-left"><div class="fi-title">★ 收藏</div></div>
         </div>
         <div v-for="f in feeds" :key="f.id" class="feed-item" :class="{ active: selectedFeed === f.id }" @click="selectFeed(f.id)">
           <div class="feed-left">
@@ -194,7 +201,12 @@
       <div class="col-head">
         <h1>{{ currentFeedTitle }}</h1>
       </div>
-      <div class="filters">
+      <div class="search-bar">
+        <input v-model="searchQuery" @keyup.enter="doSearch" @keyup.esc="clearSearch"
+               :placeholder="selectedFeed !== null ? '在本源内搜索…' : '搜索全部文章…'" />
+        <button v-if="searchActive" class="btn ghost mini" @click="clearSearch" title="清除搜索">×</button>
+      </div>
+      <div class="filters" v-show="!searchActive && !starredView">
         <button :class="{ on: filter === 'all' }" @click="setFilter('all')">全部</button>
         <button :class="{ on: filter === 'unread' }" @click="setFilter('unread')">未读</button>
         <button :class="{ on: filter === 'starred' }" @click="setFilter('starred')">星标</button>
@@ -207,12 +219,13 @@
             <span>{{ a.title }}</span>
             <button class="star-btn star" :class="{ on: a.is_starred }" @click.stop="toggleStar(a)">★</button>
           </div>
+          <div class="ai-snippet" v-if="a.snippet">{{ a.snippet }}</div>
           <div class="ai-meta">
-            <span v-if="selectedFeed === null">{{ a.feed_title }}</span>
+            <span v-if="selectedFeed === null || searchActive">{{ a.feed_title }}</span>
             <span>{{ fmtDate(a.published_at) }}</span>
           </div>
         </div>
-        <div class="empty" v-if="articles.length === 0 && !loadingList">没有文章。</div>
+        <div class="empty" v-if="articles.length === 0 && !loadingList">{{ searchActive ? '没有匹配的文章。' : (starredView ? '还没有收藏的文章。点击文章标题旁的 ★ 收藏。' : '没有文章。') }}</div>
         <div class="empty" v-if="loadingList"><span class="spin"></span> 加载中</div>
       </div>
     </div>
@@ -341,6 +354,8 @@
         return {
           feeds: [], articles: [], current: null,
           selectedFeed: null, filter: 'all',
+          starredView: false,
+          searchQuery: '', searchActive: false, searching: false,
           newUrl: '', adding: false, refreshing: false, loadingList: false,
           toast: '', _toastTimer: null,
           // 翻译
@@ -359,6 +374,7 @@
       computed: {
         totalUnread() { return this.feeds.reduce((s, f) => s + (f.unread || 0), 0); },
         currentFeedTitle() {
+          if (this.starredView) return '★ 收藏';
           if (this.selectedFeed === null) return '全部文章';
           const f = this.feeds.find(x => x.id === this.selectedFeed);
           return f ? f.title : '文章';
@@ -392,14 +408,38 @@
         async loadArticles() {
           this.loadingList = true;
           try {
-            let q = '?filter=' + this.filter + '&limit=200';
-            if (this.selectedFeed !== null) q += '&feed_id=' + this.selectedFeed;
+            let q;
+            if (this.starredView) {
+              q = '?filter=starred&limit=500';
+            } else {
+              q = '?filter=' + this.filter + '&limit=200';
+              if (this.selectedFeed !== null) q += '&feed_id=' + this.selectedFeed;
+            }
             this.articles = await this.api('/articles' + q);
           } catch (e) { this.showToast('加载文章失败：' + e.message); }
           finally { this.loadingList = false; }
         },
-        selectFeed(id) { this.selectedFeed = id; this.loadArticles(); },
+        selectFeed(id) { this.starredView = false; this._resetSearch(); this.selectedFeed = id; this.loadArticles(); },
+        selectStarred() { this.starredView = true; this._resetSearch(); this.selectedFeed = null; this.loadArticles(); },
         setFilter(f) { this.filter = f; this.loadArticles(); },
+        _resetSearch() { this.searchQuery = ''; this.searchActive = false; },
+        async doSearch() {
+          const kw = this.searchQuery.trim();
+          if (!kw) { this.clearSearch(); return; }
+          this.searching = true; this.loadingList = true;
+          try {
+            let q = '?q=' + encodeURIComponent(kw);
+            if (this.selectedFeed !== null) q += '&feed_id=' + this.selectedFeed;
+            this.articles = await this.api('/search' + q);
+            this.searchActive = true;
+          } catch (e) { this.showToast('搜索失败：' + e.message); }
+          finally { this.searching = false; this.loadingList = false; }
+        },
+        clearSearch() {
+          const wasActive = this.searchActive;
+          this.searchQuery = ''; this.searchActive = false;
+          if (wasActive) this.loadArticles();
+        },
         async addFeed() {
           const url = this.newUrl.trim();
           if (!url) return;
