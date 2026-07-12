@@ -12,3 +12,6 @@ data/*.db-journal
 
 # 临时/截图
 ui_shot*.png
+
+# release source snapshots
+*.zip
