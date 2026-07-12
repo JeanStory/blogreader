@@ -26,6 +26,14 @@ class Feed(SQLModel, table=True):
     last_status: str = "pending"  # pending | ok | error
     last_error: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # 历史文章回溯（backfill）：探测站点能力后分批补全 RSS 之外的旧文章。
+    # method: "" 未探测 | wp（WordPress REST API）| sitemap | none（两者都不支持，仅 RSS）
+    # cursor: 续抓断点——wp 为下一页页码；sitemap 为下一个 URL 下标。上限是单轮速率而非总量，
+    #         分多轮抓完，靠 Article.guid 去重保证幂等。
+    backfill_method: str = ""
+    backfill_cursor: str = ""
+    backfill_done: bool = Field(default=False)
+    backfill_total: int = 0  # 已知历史文章总数（wp 的 X-WP-Total；0=未知）
 
 
 class Article(SQLModel, table=True):

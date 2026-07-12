@@ -90,6 +90,13 @@ def add_feed(req: AddFeedReq):
     res = feed_service.add_feed(req.url.strip())
     if not res.get("ok"):
         raise HTTPException(400, res.get("message", "订阅失败"))
+    # 订阅成功后台补全历史文章（首轮限量，剩余交给定时任务接力），不阻塞响应
+    fid = res.get("feed_id")
+    if fid:
+        import threading
+        from backend import backfill_service
+        threading.Thread(target=backfill_service.run_first_backfill,
+                         args=(fid,), daemon=True).start()
     return res
 
 

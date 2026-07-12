@@ -21,6 +21,12 @@ def _job():
         logger.info("定时刷新完成：%s 个源，新增 %s 篇", res.get("feeds"), res.get("total_new"))
     except Exception:  # noqa: BLE001
         logger.exception("定时刷新失败")
+    # 增量刷新后，给尚未抓完历史的源接力补一轮 backfill（每轮限速，分多次抓完）
+    try:
+        from backend import backfill_service
+        backfill_service.backfill_all()
+    except Exception:  # noqa: BLE001
+        logger.exception("定时回溯失败")
 
 
 def start_scheduler() -> BackgroundScheduler:
