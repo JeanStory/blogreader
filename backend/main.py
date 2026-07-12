@@ -14,11 +14,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import Session, select, func, or_, col
+from sqlalchemy import case
 
 from backend.db import engine, init_db
 from backend.models import Feed, Article, Conversation, ChatMessage
@@ -100,17 +101,100 @@ def add_feed(req: AddFeedReq):
     return res
 
 
+@app.get("/api/feeds/export")
+def export_opml():
+    """把当前所有订阅源导出成 OPML（标准 RSS 订阅交换格式，可被其他阅读器导入）。"""
+    from xml.sax.saxutils import quoteattr
+
+    with Session(engine) as s:
+        feeds = s.exec(select(Feed).order_by(Feed.created_at)).all()
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<opml version="2.0">',
+        "  <head><title>BlogReader Subscriptions</title></head>",
+        "  <body>",
+    ]
+    for f in feeds:
+        title = f.title or f.site_url or f.feed_url
+        # quoteattr 会带上外层引号并转义 & < > " 等，避免标题里的特殊字符破坏 XML
+        attrs = (
+            f"text={quoteattr(title)} title={quoteattr(title)} "
+            f"type=\"rss\" xmlUrl={quoteattr(f.feed_url)} htmlUrl={quoteattr(f.site_link or f.site_url or '')}"
+        )
+        lines.append(f"    <outline {attrs} />")
+    lines += ["  </body>", "</opml>"]
+    xml = "\n".join(lines)
+    return Response(
+        content=xml,
+        media_type="text/x-opml; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="blogreader_subscriptions.opml"'},
+    )
+
+
+@app.post("/api/feeds/import")
+async def import_opml(file: UploadFile = File(...)):
+    """从上传的 OPML 文件批量导入订阅源。
+
+    逐个 xmlUrl 走正常的 add_feed 流程（含去重、feed 校验、首轮 backfill），
+    返回每条的成功/跳过/失败结果，前端可展示汇总。
+    """
+    import xml.etree.ElementTree as ET
+
+    raw = await file.read()
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as e:
+        raise HTTPException(400, f"OPML 解析失败：{e}")
+
+    # OPML 里的订阅源是带 xmlUrl 属性的 outline 节点（可能嵌套在分组 outline 下）
+    urls = []
+    for node in root.iter("outline"):
+        u = (node.get("xmlUrl") or node.get("xmlurl") or "").strip()
+        if u:
+            urls.append(u)
+    if not urls:
+        raise HTTPException(400, "OPML 中未找到任何订阅源（xmlUrl）")
+
+    added, skipped, failed = 0, 0, []
+    for u in urls:
+        try:
+            res = feed_service.add_feed(u)
+        except Exception as e:  # noqa: BLE001  单条失败不应中断整批导入
+            failed.append({"url": u, "error": str(e)})
+            continue
+        if res.get("ok"):
+            added += 1
+            fid = res.get("feed_id")
+            if fid:
+                import threading
+                from backend import backfill_service
+                threading.Thread(target=backfill_service.run_first_backfill,
+                                 args=(fid,), daemon=True).start()
+        elif "已" in res.get("message", "") or res.get("duplicate"):
+            skipped += 1
+        else:
+            failed.append({"url": u, "error": res.get("message", "订阅失败")})
+    return {"total": len(urls), "added": added, "skipped": skipped,
+            "failed": failed, "failed_count": len(failed)}
+
+
 @app.get("/api/feeds")
 def list_feeds():
     """返回所有订阅源，附带未读数与总文章数。"""
     with Session(engine) as s:
         feeds = s.exec(select(Feed).order_by(Feed.created_at)).all()
+        # 一次 GROUP BY 聚合出每个源的总数与未读数，避免每源 2 次 count 查询（N+1）
+        counts = s.exec(
+            select(
+                Article.feed_id,
+                func.count(Article.id),
+                func.sum(case((Article.is_read == False, 1), else_=0)),  # noqa: E712
+            ).group_by(Article.feed_id)
+        ).all()
+        stats = {fid: (total, int(unread or 0)) for fid, total, unread in counts}
         out = []
         for f in feeds:
-            total = s.exec(select(func.count(Article.id)).where(Article.feed_id == f.id)).one()
-            unread = s.exec(
-                select(func.count(Article.id)).where(Article.feed_id == f.id, Article.is_read == False)  # noqa: E712
-            ).one()
+            total, unread = stats.get(f.id, (0, 0))
             out.append({
                 "id": f.id, "title": f.title or f.site_url, "site_url": f.site_url,
                 "feed_url": f.feed_url, "site_link": f.site_link,
@@ -158,8 +242,14 @@ def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int
             q = q.where(Article.is_starred == True)  # noqa: E712
         q = q.order_by(Article.published_at.desc().nullslast()).limit(limit).offset(offset)
         arts = s.exec(q).all()
-        # 附带 feed 标题
-        feed_titles = {f.id: (f.title or f.site_url) for f in s.exec(select(Feed)).all()}
+        # 只查这批文章涉及的 feed，避免每次列表都全表拉取 Feed
+        fids = {a.feed_id for a in arts}
+        feed_titles = {}
+        if fids:
+            feed_titles = {
+                f.id: (f.title or f.site_url)
+                for f in s.exec(select(Feed).where(col(Feed.id).in_(fids))).all()
+            }
         return [{
             "id": a.id, "feed_id": a.feed_id, "feed_title": feed_titles.get(a.feed_id, ""),
             "title": a.title, "link": a.link, "author": a.author,
@@ -178,20 +268,49 @@ def search_articles(q: str, feed_id: Optional[int] = None, limit: int = 100):
     kw = (q or "").strip()
     if not kw:
         return []
-    like = f"%{kw}%"
     with Session(engine) as s:
-        query = select(Article).where(
-            or_(
-                col(Article.title).ilike(like),
-                col(Article.summary).ilike(like),
-                col(Article.content).ilike(like),
+        # trigram 分词器要求匹配词 >= 3 字符；更短的查询退回 LIKE 全表扫描（少见，代价可接受）。
+        use_fts = len(kw) >= 3
+        if use_fts:
+            # FTS5 MATCH：把查询词包成一个带引号的短语，内部双引号转义为两个双引号，
+            # 避免用户输入里的引号破坏 MATCH 语法或被当作 FTS 布尔操作符。
+            phrase = '"' + kw.replace('"', '""') + '"'
+            sql = (
+                "SELECT a.id FROM article_fts f JOIN article a ON a.id = f.rowid "
+                "WHERE article_fts MATCH :kw"
             )
-        )
-        if feed_id is not None:
-            query = query.where(Article.feed_id == feed_id)
-        query = query.order_by(Article.published_at.desc().nullslast()).limit(limit)
-        arts = s.exec(query).all()
-        feed_titles = {f.id: (f.title or f.site_url) for f in s.exec(select(Feed)).all()}
+            params = {"kw": phrase}
+            if feed_id is not None:
+                sql += " AND a.feed_id = :fid"
+                params["fid"] = feed_id
+            sql += " ORDER BY a.published_at DESC LIMIT :lim"
+            params["lim"] = limit
+            from sqlalchemy import text as _text
+            ids = [row[0] for row in s.exec(_text(sql).bindparams(**params))]
+            arts = []
+            if ids:
+                id_to_art = {a.id: a for a in s.exec(select(Article).where(col(Article.id).in_(ids))).all()}
+                arts = [id_to_art[i] for i in ids if i in id_to_art]
+        else:
+            like = f"%{kw}%"
+            query = select(Article).where(
+                or_(
+                    col(Article.title).ilike(like),
+                    col(Article.summary).ilike(like),
+                    col(Article.content).ilike(like),
+                )
+            )
+            if feed_id is not None:
+                query = query.where(Article.feed_id == feed_id)
+            query = query.order_by(Article.published_at.desc().nullslast()).limit(limit)
+            arts = s.exec(query).all()
+        fids = {a.feed_id for a in arts}
+        feed_titles = {}
+        if fids:
+            feed_titles = {
+                f.id: (f.title or f.site_url)
+                for f in s.exec(select(Feed).where(col(Feed.id).in_(fids))).all()
+            }
 
         def make_snippet(a: Article) -> str:
             # 优先从正文/摘要里截取命中关键词附近的一段文本

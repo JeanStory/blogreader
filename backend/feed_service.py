@@ -207,16 +207,32 @@ def add_feed(site_url: str) -> dict:
         }
 
 
-def refresh_all() -> dict:
-    """抓取所有 feed（定时任务/手动刷新用）。"""
-    total_new = 0
-    details = []
+def refresh_all(max_workers: int = 8) -> dict:
+    """并发抓取所有 feed（定时任务/手动刷新用）。
+
+    每个 feed 在独立线程 + 独立 Session 里抓取，靠 SQLite WAL + busy_timeout
+    保证并发写安全。max_workers 限制同时打开的网络连接数，避免打爆对端或本机。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     with Session(engine) as session:
         feeds = session.exec(select(Feed)).all()
-        for feed in feeds:
-            stat = fetch_feed(feed, session)
-            total_new += stat["new"]
-            details.append(stat)
+        # 先取出所有 feed id，避免 ORM 对象跨线程/session 使用
+        feed_ids = [f.id for f in feeds]
+
+    def _one(fid: int) -> dict:
+        # 每个线程用自己的 session，互不共享连接
+        with Session(engine) as s:
+            feed = s.get(Feed, fid)
+            if feed is None:
+                return {"feed_id": fid, "new": 0, "status": "error", "error": "feed not found"}
+            return fetch_feed(feed, s)
+
+    details = []
+    if feed_ids:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(feed_ids))) as ex:
+            details = list(ex.map(_one, feed_ids))
+    total_new = sum(d["new"] for d in details)
     return {"feeds": len(details), "total_new": total_new, "details": details}
 
 

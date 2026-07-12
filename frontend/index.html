@@ -173,6 +173,9 @@
         <h1>订阅源</h1>
         <div style="display:flex; gap:6px;">
           <button class="btn ghost mini" @click="openSettings" title="翻译设置">⚙</button>
+          <button class="btn ghost mini" @click="exportOpml" title="导出订阅(OPML)">↓</button>
+          <button class="btn ghost mini" @click="$refs.opmlInput.click()" title="导入订阅(OPML)">↑</button>
+          <input ref="opmlInput" type="file" accept=".opml,.xml,text/xml" style="display:none" @change="importOpml" />
           <button class="btn ghost mini" @click="refreshAll" :disabled="refreshing">
             <span v-if="refreshing" class="spin"></span><span v-else>刷新</span>
           </button>
@@ -478,6 +481,26 @@
             await this.loadArticles();
           } catch (e) { this.showToast('订阅失败：' + e.message); }
           finally { this.adding = false; }
+        },
+        exportOpml() {
+          // 直接走浏览器下载，后端 GET 返回 attachment
+          window.location.href = '/api/feeds/export';
+        },
+        async importOpml(ev) {
+          const file = ev.target.files && ev.target.files[0];
+          ev.target.value = '';  // 复位，允许连续导入同一文件
+          if (!file) return;
+          const fd = new FormData();
+          fd.append('file', file);
+          this.showToast('正在导入…');
+          try {
+            const res = await this.api('/feeds/import', { method: 'POST', body: fd });
+            const msg = `导入完成：新增 ${res.added}，跳过 ${res.skipped}` +
+              (res.failed_count ? `，失败 ${res.failed_count}` : '');
+            this.showToast(msg);
+            await this.loadFeeds();
+            await this.loadArticles();
+          } catch (e) { this.showToast('导入失败：' + e.message); }
         },
         async delFeed(f) {
           if (!confirm('删除订阅「' + f.title + '」及其所有文章？')) return;
