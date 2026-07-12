@@ -38,6 +38,28 @@ def _client() -> httpx.Client:
     return httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True)
 
 
+# 抓取重试：并发刷新时瞬时网络拥塞常导致个别源 SSL 握手超时，
+# 单点重试即可恢复。对网络类异常做有限次退避重试，不改变最终失败语义。
+_FETCH_RETRIES = 2          # 失败后额外重试次数（共尝试 1 + 2 = 3 次）
+_RETRY_BACKOFF = 1.5        # 退避基数（秒），第 n 次重试前等待 n * backoff
+
+
+def _get_with_retry(client: httpx.Client, url: str) -> httpx.Response:
+    """GET 请求，遇网络类异常（超时/连接/协议）做有限次退避重试。
+
+    只重试瞬时网络错误；HTTP 4xx/5xx 由调用方 raise_for_status 处理，不在此重试。
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_FETCH_RETRIES + 1):
+        try:
+            return client.get(url)
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            last_exc = e
+            if attempt < _FETCH_RETRIES:
+                time.sleep((attempt + 1) * _RETRY_BACKOFF)
+    raise last_exc  # type: ignore[misc]
+
+
 def _looks_like_feed(content: bytes) -> bool:
     """用 feedparser 快速判断一段内容是否为有效 feed（有条目或有 feed 标题）。"""
     parsed = feedparser.parse(content)
@@ -123,7 +145,7 @@ def fetch_feed(feed: Feed, session: Session) -> dict:
     result = {"feed_id": feed.id, "new": 0, "status": "ok", "error": ""}
     try:
         with _client() as client:
-            r = client.get(feed.feed_url)
+            r = _get_with_retry(client, feed.feed_url)
             r.raise_for_status()
             parsed = feedparser.parse(r.content)
 
@@ -207,7 +229,7 @@ def add_feed(site_url: str) -> dict:
         }
 
 
-def refresh_all(max_workers: int = 8) -> dict:
+def refresh_all(max_workers: int = 4) -> dict:
     """并发抓取所有 feed（定时任务/手动刷新用）。
 
     每个 feed 在独立线程 + 独立 Session 里抓取，靠 SQLite WAL + busy_timeout
