@@ -14,8 +14,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
+from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import Session, select, func, or_, col
@@ -26,6 +26,7 @@ from backend.models import Feed, Article, Conversation, ChatMessage
 from backend import feed_service
 from backend import scheduler as scheduler_mod
 from backend import llm
+from backend import auth
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FRONTEND = os.path.join(_BASE, "frontend")
@@ -42,6 +43,44 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="BlogReader", version="0.1", lifespan=lifespan)
+
+
+# ---------- 登录鉴权 ----------
+# 只保护 /api/*（登录端点除外）。前端静态资源、PWA 文件公开可访问，
+# 因为它们本身不含用户数据，真正的数据都在受保护的 API 后面。
+_AUTH_EXEMPT = {"/api/login", "/api/auth/status"}
+
+
+@app.middleware("http")
+async def _auth_guard(request: Request, call_next):
+    path = request.url.path
+    if (
+        auth.auth_enabled()
+        and path.startswith("/api/")
+        and path not in _AUTH_EXEMPT
+        and request.method != "OPTIONS"
+    ):
+        token = auth.token_from_header(request.headers.get("authorization"))
+        if not auth.verify_token(token):
+            return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
+    return await call_next(request)
+
+
+class LoginReq(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+def login(req: LoginReq):
+    if not auth.verify_password(req.password):
+        raise HTTPException(status_code=401, detail="密码错误")
+    return {"token": auth.issue_token()}
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    """前端启动时探测：是否需要登录。"""
+    return {"auth_required": auth.auth_enabled()}
 
 
 # ---------- 请求体模型 ----------
@@ -657,3 +696,31 @@ def index():
 
 if os.path.isdir(_FRONTEND):
     app.mount("/static", StaticFiles(directory=_FRONTEND), name="static")
+
+
+# ---------- PWA 文件（必须从根路径提供，Service Worker 才能覆盖整站 scope）----------
+@app.get("/manifest.webmanifest")
+def pwa_manifest():
+    return FileResponse(
+        os.path.join(_FRONTEND, "manifest.webmanifest"),
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/sw.js")
+def pwa_service_worker():
+    return FileResponse(
+        os.path.join(_FRONTEND, "sw.js"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Service-Worker-Allowed": "/"},
+    )
+
+
+@app.get("/icons/{name}")
+def pwa_icon(name: str):
+    # 只允许取 icons 目录下的文件，防路径穿越
+    safe = os.path.basename(name)
+    path = os.path.join(_FRONTEND, "icons", safe)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="icon not found")
+    return FileResponse(path)
