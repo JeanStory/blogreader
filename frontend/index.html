@@ -2,8 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>BlogReader · 博客阅读器</title>
+  <!-- PWA：三端浏览器可"添加到主屏幕"当原生 app 用 -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#2563eb" />
+  <link rel="icon" href="/icons/icon-192.png" />
+  <!-- iOS Safari 专属：全屏 standalone + 主屏图标 -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="BlogReader" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script>
     // MathJax v3：手动 typeset 模式。inlineMath 支持 $...$ 与 \(...\)，
@@ -103,7 +112,24 @@
     .reader-body h2 { font-size: 24px; margin-bottom: 10px; line-height: 1.3; }
     .reader-meta { color: var(--muted); font-size: 13px; margin-bottom: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .reader-content { font-size: 15px; line-height: 1.75; word-wrap: break-word; }
-    .reader-content img { max-width: 100%; height: auto; }
+    .reader-content img { max-width: 100%; height: auto; cursor: zoom-in; }
+    .img-lightbox {
+      position: fixed; inset: 0; z-index: 100000;
+      background: rgba(0,0,0,0.85);
+      display: flex; align-items: center; justify-content: center;
+      cursor: zoom-out;
+    }
+    .img-lightbox img {
+      max-width: 92vw; max-height: 92vh;
+      object-fit: contain; cursor: default;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5); border-radius: 4px;
+    }
+    .img-lightbox-close {
+      position: fixed; top: 16px; right: 24px;
+      color: #fff; font-size: 40px; line-height: 1;
+      cursor: pointer; user-select: none; opacity: 0.8;
+    }
+    .img-lightbox-close:hover { opacity: 1; }
     .reader-content pre { background: #f4f4f6; padding: 12px; border-radius: 6px; overflow-x: auto; }
     .reader-content :not(pre) > code { background: #f0f0f2; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #c0341d; word-break: break-word; }
     .reader-content table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; display: block; overflow-x: auto; }
@@ -163,10 +189,85 @@
     .chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); align-items: flex-end; }
     .chat-input textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; line-height: 1.5; box-sizing: border-box; }
     .chat-input textarea:focus { outline: none; border-color: var(--accent); }
+
+    /* 登录遮罩 */
+    .login-overlay { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #eef2ff, #f8fafc); }
+    .login-card { width: 300px; max-width: 88vw; background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 32px 28px; box-shadow: 0 12px 40px rgba(0,0,0,.1); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .login-logo { font-size: 40px; line-height: 1; }
+    .login-card h2 { margin: 0; font-size: 20px; color: var(--text); }
+    .login-hint { margin: 0 0 4px; font-size: 13px; color: var(--muted); }
+    .login-card input { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+    .login-card input:focus { outline: none; border-color: var(--accent); }
+    .login-btn { width: 100%; justify-content: center; padding: 10px; font-size: 14px; }
+    .login-error { color: #dc2626; font-size: 13px; text-align: center; }
+
+    /* ============ 响应式自适应布局 ============ */
+    /* 返回按钮 / 移动顶栏：默认（宽屏）隐藏 */
+    .mobile-back { display: none; }
+    .mobile-topbar { display: none; }
+
+    /* 大屏 → 中屏：栏宽按比例收缩，避免阅读区被挤压 */
+    @media (max-width: 1200px) {
+      .col-feeds { width: 220px; }
+      .col-list  { width: 320px; }
+    }
+    @media (max-width: 1000px) {
+      .col-feeds { width: 200px; }
+      .col-list  { width: 280px; }
+      .reader-toc { display: none; }        /* 隐藏右侧目录，给正文让空间 */
+      .reader-body { padding: 24px 28px; }
+    }
+    @media (max-width: 820px) {
+      .col-feeds { width: 180px; }
+      .col-list  { width: 240px; }
+      .reader-body { padding: 20px 18px; }
+    }
+
+    /* 窄屏（平板竖屏 / 手机）：单栏切换模式 */
+    @media (max-width: 700px) {
+      #app { position: relative; }
+      .col-feeds, .col-list, .col-reader {
+        position: absolute; inset: 0;
+        width: 100%; border-right: none;
+        display: none;                       /* 默认隐藏，由 pane class 控制 */
+      }
+      body.pane-feeds  .col-feeds  { display: flex; }
+      body.pane-list   .col-list   { display: flex; }
+      body.pane-reader .col-reader { display: flex; }
+
+      .mobile-back { display: inline-flex; align-items: center; }
+      .mobile-topbar {
+        display: flex; align-items: center;
+        padding: 8px 12px; border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .reader-toc { display: none; }
+      .reader-body { padding: 18px 16px; }
+      .chat-panel { width: 100%; max-width: 100vw; }
+    }
   </style>
 </head>
 <body>
   <div id="app">
+    <!-- 图片放大 lightbox -->
+    <div v-if="lightboxSrc" class="img-lightbox" @click="lightboxSrc = ''">
+      <img :src="lightboxSrc" @click.stop>
+      <div class="img-lightbox-close" @click="lightboxSrc = ''">×</div>
+    </div>
+    <!-- 登录遮罩：后端要求登录且未持有 token 时显示 -->
+    <div v-if="authChecked && authRequired && !token" class="login-overlay">
+      <form class="login-card" @submit.prevent="doLogin">
+        <div class="login-logo">📖</div>
+        <h2>BlogReader</h2>
+        <p class="login-hint">请输入访问密码</p>
+        <input type="password" v-model="loginPassword" placeholder="密码"
+               autocomplete="current-password" :disabled="loginBusy" autofocus />
+        <button class="btn login-btn" type="submit" :disabled="loginBusy || !loginPassword">
+          <span v-if="loginBusy" class="spin"></span><span v-else>登录</span>
+        </button>
+        <div v-if="loginError" class="login-error">{{ loginError }}</div>
+      </form>
+    </div>
     <!-- 左栏：订阅源 -->
     <div class="col-feeds">
       <div class="col-head">
@@ -213,6 +314,7 @@
     <!-- 中栏：文章列表 -->
     <div class="col-list">
       <div class="col-head">
+        <button class="btn ghost mini mobile-back" @click="mobilePane = 'feeds'" title="返回订阅">‹ 订阅</button>
         <h1>{{ currentFeedTitle }}</h1>
       </div>
       <div class="search-bar">
@@ -246,6 +348,9 @@
 
     <!-- 右栏：正文 -->
     <div class="col-reader">
+      <div class="mobile-topbar">
+        <button class="btn ghost mini mobile-back" @click="mobilePane = 'list'" title="返回列表">‹ 列表</button>
+      </div>
       <div v-if="current">
         <div class="reader-toolbar">
           <button class="btn ghost mini" @click="toggleRead(current)">
@@ -281,7 +386,7 @@
             <span v-if="current.author">{{ current.author }}</span>
             <span>{{ fmtDate(current.published_at) }}</span>
           </div>
-          <div class="reader-content" v-html="current.content"></div>
+          <div class="reader-content" v-html="current.content" @click="onImgClick"></div>
         </div>
         <nav class="reader-toc" v-if="toc.length">
           <div class="toc-head">目录</div>
@@ -377,10 +482,17 @@
     createApp({
       data() {
         return {
+          lightboxSrc: '',
           feeds: [], articles: [], current: null,
+          // 登录鉴权
+          token: localStorage.getItem('br_token') || '',
+          authRequired: false, authChecked: false,
+          loginPassword: '', loginError: '', loginBusy: false,
           toc: [], activeTocId: null,
           selectedFeed: null, filter: 'all',
           starredView: false,
+          // 响应式：小屏单栏切换 feeds | list | reader
+          mobilePane: 'list',
           searchQuery: '', searchActive: false, searching: false,
           newUrl: '', adding: false, refreshing: false, loadingList: false,
           toast: '', _toastTimer: null,
@@ -407,14 +519,60 @@
         },
       },
       methods: {
+        onImgClick(e) {
+          if (e.target && e.target.tagName === 'IMG') {
+            this.lightboxSrc = e.target.currentSrc || e.target.src;
+          }
+        },
         async api(path, opts) {
-          const r = await fetch('/api' + path, opts);
+          opts = opts || {};
+          const headers = Object.assign({}, opts.headers || {});
+          if (this.token) headers['Authorization'] = 'Bearer ' + this.token;
+          const r = await fetch('/api' + path, Object.assign({}, opts, { headers }));
+          if (r.status === 401) { this.logout(); throw new Error('未登录或登录已过期'); }
           if (!r.ok) {
             let msg = r.statusText;
             try { const j = await r.json(); msg = j.detail || msg; } catch (e) {}
             throw new Error(msg);
           }
           return r.status === 204 ? null : r.json();
+        },
+        authHeaders(base) {
+          const h = Object.assign({}, base || {});
+          if (this.token) h['Authorization'] = 'Bearer ' + this.token;
+          return h;
+        },
+        async doLogin() {
+          this.loginError = '';
+          this.loginBusy = true;
+          try {
+            const r = await fetch('/api/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: this.loginPassword }),
+            });
+            if (!r.ok) {
+              let msg = '登录失败';
+              try { const j = await r.json(); msg = j.detail || msg; } catch (e) {}
+              throw new Error(msg);
+            }
+            const j = await r.json();
+            this.token = j.token;
+            localStorage.setItem('br_token', j.token);
+            this.authRequired = false;
+            this.loginPassword = '';
+            await this.loadFeeds();
+            await this.loadArticles();
+          } catch (e) {
+            this.loginError = e.message || String(e);
+          } finally {
+            this.loginBusy = false;
+          }
+        },
+        logout() {
+          this.token = '';
+          localStorage.removeItem('br_token');
+          this.authRequired = true;
         },
         showToast(msg) {
           this.toast = msg;
@@ -445,8 +603,8 @@
           } catch (e) { this.showToast('加载文章失败：' + e.message); }
           finally { this.loadingList = false; }
         },
-        selectFeed(id) { this.starredView = false; this._resetSearch(); this.selectedFeed = id; this.loadArticles(); },
-        selectStarred() { this.starredView = true; this._resetSearch(); this.selectedFeed = null; this.loadArticles(); },
+        selectFeed(id) { this.starredView = false; this._resetSearch(); this.selectedFeed = id; this.mobilePane = 'list'; this.loadArticles(); },
+        selectStarred() { this.starredView = true; this._resetSearch(); this.selectedFeed = null; this.mobilePane = 'list'; this.loadArticles(); },
         setFilter(f) { this.filter = f; this.loadArticles(); },
         _resetSearch() { this.searchQuery = ''; this.searchActive = false; },
         async doSearch() {
@@ -526,6 +684,7 @@
         async openArticle(a) {
           try {
             this.current = await this.api('/articles/' + a.id);
+            this.mobilePane = 'reader';
             this.resetTranslation();
             this.chatMessages = [];
             this.chatSelection = '';
@@ -958,9 +1117,10 @@
           try {
             const resp = await fetch('/api/chat', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: this.authHeaders({ 'Content-Type': 'application/json' }),
               body: JSON.stringify(body),
             });
+            if (resp.status === 401) { this.logout(); throw new Error('未登录或登录已过期'); }
             if (!resp.ok) {
               let msg = resp.statusText;
               try { const j = await resp.json(); msg = j.detail || msg; } catch (e) {}
@@ -1036,7 +1196,28 @@
           }
         },
       },
+      watch: {
+        mobilePane: {
+          immediate: true,
+          handler(v) {
+            document.body.classList.remove('pane-feeds', 'pane-list', 'pane-reader');
+            document.body.classList.add('pane-' + v);
+          }
+        }
+      },
       async mounted() {
+        // 注册 Service Worker（PWA：离线可打开 + 可安装到主屏）
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+        // 探测后端是否要求登录
+        try {
+          const s = await fetch('/api/auth/status').then((r) => r.json());
+          this.authRequired = !!s.auth_required;
+        } catch (e) { this.authRequired = false; }
+        this.authChecked = true;
+        // 需要登录但没有有效 token：停在登录页，不加载数据
+        if (this.authRequired && !this.token) return;
         await this.loadFeeds();
         await this.loadArticles();
         this._selHandler = this._onDocMouseUp.bind(this);
