@@ -41,12 +41,19 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
     }
-    #app { display: flex; height: 100vh; overflow: hidden; }
+    #app { display: flex; height: 100vh; overflow: hidden; --w-feeds: 260px; --w-list: 360px; }
 
     /* 左栏：订阅列表 */
-    .col-feeds { width: 260px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-    .col-list { width: 360px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-    .col-reader { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .col-feeds { width: var(--w-feeds); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; }
+    .col-list { width: var(--w-list); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; }
+    .col-reader { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* 可拖拽分隔条：调节相邻栏宽度 */
+    .resizer { flex-shrink: 0; width: 5px; cursor: col-resize; background: var(--border); position: relative; transition: background .15s; }
+    .resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
+    .resizer:hover, .resizer.dragging { background: var(--accent); }
+    body.resizing { cursor: col-resize; user-select: none; }
+    body.resizing iframe { pointer-events: none; }
 
     .col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .col-head h1 { font-size: 15px; font-weight: 600; }
@@ -206,20 +213,17 @@
     .mobile-back { display: none; }
     .mobile-topbar { display: none; }
 
-    /* 大屏 → 中屏：栏宽按比例收缩，避免阅读区被挤压 */
+    /* 大屏 → 中屏：栏宽按比例收缩，避免阅读区被挤压（设默认变量，用户拖拽后 inline 值优先） */
     @media (max-width: 1200px) {
-      .col-feeds { width: 220px; }
-      .col-list  { width: 320px; }
+      #app { --w-feeds: 220px; --w-list: 320px; }
     }
     @media (max-width: 1000px) {
-      .col-feeds { width: 200px; }
-      .col-list  { width: 280px; }
+      #app { --w-feeds: 200px; --w-list: 280px; }
       .reader-toc { display: none; }        /* 隐藏右侧目录，给正文让空间 */
       .reader-body { padding: 24px 28px; }
     }
     @media (max-width: 820px) {
-      .col-feeds { width: 180px; }
-      .col-list  { width: 240px; }
+      #app { --w-feeds: 180px; --w-list: 240px; }
       .reader-body { padding: 20px 18px; }
     }
 
@@ -231,6 +235,7 @@
         width: 100%; border-right: none;
         display: none;                       /* 默认隐藏，由 pane class 控制 */
       }
+      .resizer { display: none; }            /* 单栏模式无需分隔条 */
       body.pane-feeds  .col-feeds  { display: flex; }
       body.pane-list   .col-list   { display: flex; }
       body.pane-reader .col-reader { display: flex; }
@@ -311,6 +316,9 @@
       </div>
     </div>
 
+    <!-- 分隔条：拖拽调节订阅栏宽度（双击复位） -->
+    <div class="resizer" @mousedown.prevent="startResize('feeds', $event)" @dblclick="resetWidth('feeds')" title="拖拽调节订阅栏宽度，双击复位"></div>
+
     <!-- 中栏：文章列表 -->
     <div class="col-list">
       <div class="col-head">
@@ -345,6 +353,9 @@
         <div class="empty" v-if="loadingList"><span class="spin"></span> 加载中</div>
       </div>
     </div>
+
+    <!-- 分隔条：拖拽调节文章列表宽度（双击复位） -->
+    <div class="resizer" @mousedown.prevent="startResize('list', $event)" @dblclick="resetWidth('list')" title="拖拽调节文章列表宽度，双击复位"></div>
 
     <!-- 右栏：正文 -->
     <div class="col-reader">
@@ -519,6 +530,51 @@
         },
       },
       methods: {
+        // ===== 三栏宽度拖拽调节 =====
+        startResize(which, e) {
+          const app = document.getElementById('app');
+          const varName = which === 'feeds' ? '--w-feeds' : '--w-list';
+          const lsKey = which === 'feeds' ? 'br_w_feeds' : 'br_w_list';
+          const min = which === 'feeds' ? 160 : 240;
+          const max = which === 'feeds' ? 480 : 640;
+          const startX = e.clientX;
+          const startW = parseInt(getComputedStyle(app).getPropertyValue(varName)) || (which === 'feeds' ? 260 : 360);
+          const rz = e.currentTarget;
+          if (rz && rz.classList) rz.classList.add('dragging');
+          document.body.classList.add('resizing');
+          const onMove = (ev) => {
+            let w = startW + (ev.clientX - startX);
+            if (w < min) w = min;
+            if (w > max) w = max;
+            app.style.setProperty(varName, w + 'px');
+          };
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.classList.remove('resizing');
+            if (rz && rz.classList) rz.classList.remove('dragging');
+            try { localStorage.setItem(lsKey, parseInt(app.style.getPropertyValue(varName))); } catch (err) {}
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        },
+        resetWidth(which) {
+          const app = document.getElementById('app');
+          const varName = which === 'feeds' ? '--w-feeds' : '--w-list';
+          const lsKey = which === 'feeds' ? 'br_w_feeds' : 'br_w_list';
+          app.style.removeProperty(varName);
+          try { localStorage.removeItem(lsKey); } catch (err) {}
+        },
+        _restoreWidths() {
+          const app = document.getElementById('app');
+          if (!app) return;
+          try {
+            const f = parseInt(localStorage.getItem('br_w_feeds'));
+            const l = parseInt(localStorage.getItem('br_w_list'));
+            if (f && f >= 160 && f <= 480) app.style.setProperty('--w-feeds', f + 'px');
+            if (l && l >= 240 && l <= 640) app.style.setProperty('--w-list', l + 'px');
+          } catch (err) {}
+        },
         onImgClick(e) {
           if (e.target && e.target.tagName === 'IMG') {
             this.lightboxSrc = e.target.currentSrc || e.target.src;
@@ -1206,6 +1262,8 @@
         }
       },
       async mounted() {
+        // 恢复用户上次拖拽保存的栏宽
+        this._restoreWidths();
         // 注册 Service Worker（PWA：离线可打开 + 可安装到主屏）
         if ('serviceWorker' in navigator) {
           navigator.serviceWorker.register('/sw.js').catch(() => {});
