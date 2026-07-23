@@ -44,8 +44,8 @@
     #app { display: flex; height: 100vh; overflow: hidden; --w-feeds: 260px; --w-list: 360px; }
 
     /* 左栏：订阅列表 */
-    .col-feeds { width: var(--w-feeds); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; }
-    .col-list { width: var(--w-list); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; }
+    .col-feeds { width: var(--w-feeds); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; overflow: hidden; }
+    .col-list { width: var(--w-list); flex-shrink: 0; background: var(--panel); display: flex; flex-direction: column; overflow: hidden; }
     .col-reader { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 
     /* 可拖拽分隔条：调节相邻栏宽度 */
@@ -72,7 +72,7 @@
 
     /* 加订阅表单 */
     .add-form { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
-    .add-form input { flex: 1; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+    .add-form input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
     .add-form input:focus { outline: none; border-color: var(--accent); }
     .btn { padding: 7px 12px; border: none; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; white-space: nowrap; }
     .btn:disabled { opacity: .5; cursor: not-allowed; }
