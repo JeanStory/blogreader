@@ -55,6 +55,15 @@
     body.resizing { cursor: col-resize; user-select: none; }
     body.resizing iframe { pointer-events: none; }
 
+    /* 栏折叠/展开 */
+    .col-feeds.collapsed, .col-list.collapsed { width: 0 !important; overflow: hidden; padding: 0; border: none; }
+    .col-feeds.collapsed + .resizer, .col-list.collapsed + .resizer { display: none; }
+    .collapse-btn { background: none; border: none; cursor: pointer; font-size: 16px; color: var(--muted); padding: 2px 6px; border-radius: 4px; line-height: 1; }
+    .collapse-btn:hover { background: var(--border); color: var(--fg); }
+    .expand-bar { flex-shrink: 0; width: 24px; display: flex; align-items: center; justify-content: center; background: var(--panel); border-right: 1px solid var(--border); cursor: pointer; writing-mode: vertical-rl; font-size: 12px; color: var(--muted); user-select: none; transition: background .15s; }
+    .expand-bar:hover { background: var(--border); color: var(--fg); }
+    .expand-bar .expand-label { letter-spacing: 2px; }
+
     .col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .col-head h1 { font-size: 15px; font-weight: 600; }
     .col-head .sub { font-size: 12px; color: var(--muted); font-weight: 400; }
@@ -274,10 +283,12 @@
       </form>
     </div>
     <!-- 左栏：订阅源 -->
-    <div class="col-feeds">
+    <div class="expand-bar" v-if="feedsCollapsed" @click="toggleCollapse('feeds')" title="展开订阅栏"><span class="expand-label">订 阅 源</span></div>
+    <div class="col-feeds" :class="{ collapsed: feedsCollapsed }">
       <div class="col-head">
         <h1>订阅源</h1>
         <div style="display:flex; gap:6px;">
+          <button class="collapse-btn" @click="toggleCollapse('feeds')" title="收起订阅栏">«</button>
           <button class="btn ghost mini" @click="openSettings" title="翻译设置">⚙</button>
           <button class="btn ghost mini" @click="exportOpml" title="导出订阅(OPML)">↓</button>
           <button class="btn ghost mini" @click="$refs.opmlInput.click()" title="导入订阅(OPML)">↑</button>
@@ -319,11 +330,13 @@
     <!-- 分隔条：拖拽调节订阅栏宽度（双击复位） -->
     <div class="resizer" @mousedown.prevent="startResize('feeds', $event)" @dblclick="resetWidth('feeds')" title="拖拽调节订阅栏宽度，双击复位"></div>
 
+    <div class="expand-bar" v-if="listCollapsed" @click="toggleCollapse('list')" title="展开文章列表"><span class="expand-label">文 章 列 表</span></div>
     <!-- 中栏：文章列表 -->
-    <div class="col-list">
+    <div class="col-list" :class="{ collapsed: listCollapsed }">
       <div class="col-head">
         <button class="btn ghost mini mobile-back" @click="mobilePane = 'feeds'" title="返回订阅">‹ 订阅</button>
         <h1>{{ currentFeedTitle }}</h1>
+        <button class="collapse-btn" @click="toggleCollapse('list')" title="收起文章列表">«</button>
       </div>
       <div class="search-bar">
         <input v-model="searchQuery" @keyup.enter="doSearch" @keyup.esc="clearSearch"
@@ -494,6 +507,8 @@
       data() {
         return {
           lightboxSrc: '',
+          feedsCollapsed: localStorage.getItem('br_feeds_collapsed') === '1',
+          listCollapsed: localStorage.getItem('br_list_collapsed') === '1',
           feeds: [], articles: [], current: null,
           // 登录鉴权
           token: localStorage.getItem('br_token') || '',
@@ -530,6 +545,16 @@
         },
       },
       methods: {
+        // ===== 栏折叠/展开 =====
+        toggleCollapse(which) {
+          if (which === 'feeds') {
+            this.feedsCollapsed = !this.feedsCollapsed;
+            localStorage.setItem('br_feeds_collapsed', this.feedsCollapsed ? '1' : '0');
+          } else {
+            this.listCollapsed = !this.listCollapsed;
+            localStorage.setItem('br_list_collapsed', this.listCollapsed ? '1' : '0');
+          }
+        },
         // ===== 三栏宽度拖拽调节 =====
         startResize(which, e) {
           const app = document.getElementById('app');
