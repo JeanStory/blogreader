@@ -64,8 +64,8 @@
     .expand-bar:hover { background: var(--border); color: var(--fg); }
     .expand-bar .expand-label { letter-spacing: 2px; }
 
-    .col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .col-head h1 { font-size: 15px; font-weight: 600; }
+    .col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .col-head h1 { font-size: 15px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .col-head .sub { font-size: 12px; color: var(--muted); font-weight: 400; }
 
     .scroll { overflow-y: auto; flex: 1; }
@@ -287,7 +287,7 @@
     <div class="col-feeds" :class="{ collapsed: feedsCollapsed }">
       <div class="col-head">
         <h1>订阅源</h1>
-        <div style="display:flex; gap:6px;">
+        <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
           <button class="collapse-btn" @click="toggleCollapse('feeds')" title="收起订阅栏">«</button>
           <button class="btn ghost mini" @click="openSettings" title="翻译设置">⚙</button>
           <button class="btn ghost mini" @click="exportOpml" title="导出订阅(OPML)">↓</button>
