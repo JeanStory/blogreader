@@ -443,26 +443,30 @@ def _merge_split_paragraphs(soup) -> None:
 def _extract_main_html(html: str) -> Optional[str]:
     """用 trafilatura 提取正文 HTML。
 
-    trafilatura 1.12.2 在 include_links=True 且页面含无 target 的锚点时会抛
-    TypeError（convert_to_html 的已知缺陷）。故先尝试带链接提取，失败则回退
-    到不带链接的提取，保证正文仍能抓到。
+    trafilatura 1.12.2 在部分页面上，当 include_links=True 或 include_formatting=True
+    时会抛 KeyError(None)/TypeError（convert_to_html 的已知缺陷）。故按"保真度从高到低"
+    逐级降级：每一档去掉一个可能触发崩溃的选项，直到某档成功。只要有一档能出正文就返回，
+    保证正文不因单个可选特性崩溃而整体丢失。
     """
     import trafilatura
 
-    common = dict(
-        output_format="html",
-        include_images=True,
-        include_formatting=True,
-        favor_recall=True,
-    )
-    try:
-        return trafilatura.extract(html, include_links=True, **common)
-    except Exception:
-        # 回退：不带链接，避开 include_links 触发的 lxml 崩溃
+    # 从最完整到最保守，逐级降级。images 单独保留到较后（图片价值高且很少触发崩溃）。
+    ladders = [
+        dict(output_format="html", include_images=True, include_formatting=True, favor_recall=True, include_links=True),
+        dict(output_format="html", include_images=True, include_formatting=True, favor_recall=True),
+        dict(output_format="html", include_images=True, favor_recall=True),
+        dict(output_format="html", include_images=True),
+        dict(output_format="html"),
+    ]
+    for kw in ladders:
         try:
-            return trafilatura.extract(html, include_links=False, **common)
+            r = trafilatura.extract(html, **kw)
+            if r:
+                return r
         except Exception:
-            return None
+            continue
+    return None
+
 
 
 def fetch_full_content(article_id: int) -> dict:

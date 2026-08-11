@@ -117,7 +117,11 @@ _SITEMAP_CANDIDATES = [
 # 非文章 URL（分类/标签/作者/分页/静态资源等）过滤
 _NON_ARTICLE = re.compile(
     r"/(tag|tags|category|categories|author|page|search|feed|wp-json|comments)/|"
-    r"\.(xml|jpe?g|png|gif|webp|svg|pdf|css|js|ico)$",
+    r"\.(xml|jpe?g|png|gif|webp|svg|pdf|css|js|ico|txt)$|"
+    # 搜索引擎/站点验证占位文件：如 google<hash>.html、BingSiteAuth.xml、
+    # 各类 -site-verification 文件，本身无正文，需剔除。
+    r"/(google[0-9a-f]{8,}|bingsiteauth|yandex_[0-9a-f]+|pinterest-[0-9a-z]+)\.\w+$|"
+    r"[-_]?site-verification",
     re.I,
 )
 
