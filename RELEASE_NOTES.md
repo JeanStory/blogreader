@@ -6,7 +6,7 @@ BlogReader 是一款本地优先（local-first）的个人博客聚合阅读器�
 
 ---
 
-## [未发布]
+## [1.3.1] - 2026-08-11
 
 ### 修复
 - **全文提取崩溃兜底**：`trafilatura` 在部分页面上启用 `include_formatting` 等选项时会抛 `KeyError`，导致整篇正文丢失（如 Chip Huyen 的 RLHF、LLM Engineering 等长文）。将提取逻辑改为**渐进降级链**——从「全选项」逐级回退到「去 formatting → 去 recall → 裸 HTML」，任一档成功即返回，保证格式正常的页面拿到最高保真度、异常页面也不再整篇丢失。
