@@ -70,6 +70,64 @@ def is_configured(cfg: Optional[dict] = None) -> bool:
     return bool(cfg.get("base_url") and cfg.get("api_key") and cfg.get("model"))
 
 
+# ---------- 非文章过滤开关（三层漏斗第 3 层） ----------
+_FILTER_KEY = "llm_filter_enabled"
+
+
+def is_filter_enabled() -> bool:
+    """LLM 非文章过滤是否开启。独立开关，默认关。仅当开关开且已配置模型时才生效。"""
+    with Session(engine) as s:
+        row = s.get(Setting, _FILTER_KEY)
+        return bool(row and row.value == "1")
+
+
+def set_filter_enabled(enabled: bool) -> None:
+    from datetime import datetime
+    with Session(engine) as s:
+        row = s.get(Setting, _FILTER_KEY)
+        val = "1" if enabled else "0"
+        if row is None:
+            row = Setting(key=_FILTER_KEY, value=val)
+        else:
+            row.value = val
+            row.updated_at = datetime.utcnow()
+        s.add(row)
+        s.commit()
+
+
+def classify_article(title: str, content_text: str, cfg: Optional[dict] = None) -> Optional[bool]:
+    """判定一段正文是不是"真正的博客文章"。
+
+    返回 True=是文章 / False=非文章（导航/关于/订阅/重定向等功能页）/ None=判不了（保留）。
+    fail-safe：任何异常、超时、无法解析的输出都返回 None，交由调用方按"保留"处理，
+    宁可漏判也绝不误删/误标。用低温度、极小 max_tokens，只要一个词。
+    """
+    cfg = cfg or get_config()
+    if not is_configured(cfg):
+        return None
+    snippet = (content_text or "").strip()[:1500]
+    if not snippet:
+        return None
+    system = (
+        "You are a classifier that decides whether a web page is a real blog/article "
+        "post (actual prose content the author wrote to read), or a non-article utility "
+        "page such as navigation, index/listing, About, Start Here, subscribe/newsletter, "
+        "contact, or a redirect stub. Reply with EXACTLY one word: ARTICLE or NON_ARTICLE."
+    )
+    user = f"Title: {title or '(none)'}\n\nContent (truncated):\n{snippet}"
+    try:
+        raw = chat([{"role": "user", "content": user}], system=system, cfg=cfg,
+                   max_tokens=8, temperature=0.0, timeout=30.0)
+    except Exception:
+        return None
+    verdict = (raw or "").strip().upper()
+    if "NON_ARTICLE" in verdict or "NON-ARTICLE" in verdict:
+        return False
+    if "ARTICLE" in verdict:
+        return True
+    return None
+
+
 # ---------- 底层聊天调用 ----------
 class LLMError(Exception):
     """对外抛出的可读错误。"""

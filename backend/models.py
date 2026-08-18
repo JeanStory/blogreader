@@ -54,6 +54,13 @@ class Article(SQLModel, table=True):
     is_read: bool = Field(default=False, index=True)
     is_starred: bool = Field(default=False, index=True)
     fetched_at: datetime = Field(default_factory=datetime.utcnow)
+    # LLM 非文章过滤（三层漏斗第 3 层，正文级语义判定）：
+    # - llm_checked: 已被 LLM 判为 ARTICLE（真文章）后置真，之后永不再判，省成本、防刷新重复分析。
+    # - llm_flag_count: 连续被 LLM 判为 NON_ARTICLE 的次数，累计到 3 就停判（避免反复误判某篇正常波动的文章）。
+    # - is_flagged: 被判为疑似非文章，从文章列表/搜索结果中隐藏（数据保留在库，不自动删除）。
+    llm_checked: bool = Field(default=False)
+    llm_flag_count: int = Field(default=0)
+    is_flagged: bool = Field(default=False, index=True)
 
 
 class Setting(SQLModel, table=True):

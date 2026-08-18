@@ -117,7 +117,7 @@ _SITEMAP_CANDIDATES = [
 # 非文章 URL（分类/标签/作者/分页/静态资源等）过滤
 _NON_ARTICLE = re.compile(
     r"/(tag|tags|category|categories|author|page|search|feed|wp-json|comments)/|"
-    r"\.(xml|jpe?g|png|gif|webp|svg|pdf|css|js|ico|txt)$|"
+    r"\.(xml|jpe?g|png|gif|webp|svg|pdf|css|js|ico|txt|json)$|"
     # 搜索引擎/站点验证占位文件：如 google<hash>.html、BingSiteAuth.xml、
     # 各类 -site-verification 文件，本身无正文，需剔除。
     r"/(google[0-9a-f]{8,}|bingsiteauth|yandex_[0-9a-f]+|pinterest-[0-9a-z]+)\.\w+$|"
@@ -133,6 +133,14 @@ _NAV_SLUGS = {
     "tag", "tags", "category", "categories", "author", "authors",
     "about", "faq", "search", "contact", "index", "home",
     "blog", "articles", "feed", "rss", "atom", "sitemap",
+    # 常见"功能页/导航页"顶层 slug：个人站点常有的关于/订阅/导航/工具页，
+    # 本身不是文章。命名各站不同，这里收录常见款，正文级校验再兜底剩余。
+    "start-here", "start", "ama", "subscribe", "newsletter", "topic-poll",
+    # 注：故意不含 "how-i-can-help"，用户明确要求保留这类"如何找我帮忙"页。
+    "investments", "metrics", "prototyping", "readme",
+    "now", "uses", "colophon", "speaking", "portfolio", "projects",
+    "resume", "cv", "hire-me", "work-with-me", "support", "donate",
+    "privacy", "terms", "disclaimer", "redirects",
 }
 
 

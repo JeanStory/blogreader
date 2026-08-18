@@ -148,7 +148,6 @@ def fetch_feed(feed: Feed, session: Session) -> dict:
             r = _get_with_retry(client, feed.feed_url)
             r.raise_for_status()
             parsed = feedparser.parse(r.content)
-
         # 更新 feed 元信息（首次抓取时补全标题）
         if parsed.feed.get("title") and not feed.title:
             feed.title = parsed.feed.get("title", "")
@@ -157,10 +156,20 @@ def fetch_feed(feed: Feed, session: Session) -> dict:
         if parsed.feed.get("link") and not feed.site_link:
             feed.site_link = parsed.feed.get("link", "")
 
+        # URL 级导航/非文章过滤：与 backfill 用同一判据，避免首页、/about/、
+        # /faq/、站点验证文件等在每次刷新时被反复拉回。惰性 import 断开与
+        # backfill_service 的循环依赖（backfill 顶部已 import feed_service）。
+        from backend.backfill_service import _NON_ARTICLE, _is_nav_url
+
+        new_articles: list[Article] = []
         for entry in parsed.entries:
             link = entry.get("link", "")
             guid = _entry_guid(entry, link)
             if not guid:
+                continue
+            # 拉取列表时即过滤：导航/列表页、站点验证文件等非文章 URL 直接跳过。
+            if link and (_NON_ARTICLE.search(link) or _is_nav_url(link)):
+                result["skipped_nav"] = result.get("skipped_nav", 0) + 1
                 continue
             exists = session.exec(select(Article).where(Article.guid == guid)).first()
             if exists:
@@ -176,6 +185,7 @@ def fetch_feed(feed: Feed, session: Session) -> dict:
                 published_at=_parse_time(entry),
             )
             session.add(article)
+            new_articles.append(article)
             result["new"] += 1
 
         feed.last_status = "ok"
@@ -183,6 +193,8 @@ def fetch_feed(feed: Feed, session: Session) -> dict:
         feed.last_fetched_at = datetime.utcnow()
         session.add(feed)
         session.commit()
+        # commit 后主键才生成；回填新增文章 id 供刷新端点做后台 LLM 语义过滤。
+        result["new_ids"] = [a.id for a in new_articles if a.id is not None]
     except Exception as e:  # noqa: BLE001
         session.rollback()
         result["new"] = 0  # 抓取失败，之前累加的计数作废（数据已回滚）
@@ -468,6 +480,102 @@ def _extract_main_html(html: str) -> Optional[str]:
     return None
 
 
+# 重定向占位页特征：静态站的 /ama/ 等页面正文往往只有一句 "Redirecting…"，
+# 或页面 <head> 里带 meta http-equiv=refresh 立即跳转。这类页无实际内容。
+_META_REFRESH = re.compile(
+    r"<meta[^>]+http-equiv=['\"]?refresh['\"]?[^>]*>", re.I,
+)
+_REDIRECT_HINT = re.compile(r"redirecting|click here if you are not redirected", re.I)
+
+
+def _looks_like_non_article(html: str, extracted: Optional[str]) -> Optional[str]:
+    """确定性判断"抓下来的页面不是文章"。是则返回原因，否则返回 None。
+
+    仅用零成本信号（不调 LLM）：
+      - meta refresh 跳转页：<head> 声明立即重定向；
+      - "Redirecting…" 占位文案且正文极短；
+      - trafilatura 完全提取不到正文（纯导航/空页）。
+    保守起见只在正文很短时才依据文案判定，避免误伤正常长文里偶现的措辞。
+    """
+    text = (extracted or "").strip()
+    plain_len = len(re.sub(r"<[^>]+>", "", text))
+    if _META_REFRESH.search(html or ""):
+        return "meta refresh redirect"
+    if plain_len < 200 and _REDIRECT_HINT.search(text):
+        return "redirect stub"
+    if not text:
+        return "no extractable content"
+    return None
+
+
+_LLM_MIN_LEN = 200          # 短于此长度交由确定性层（Layer 2）处理，不劳烦 LLM
+_LLM_MAX_LEN = 800          # 长于此长度基本必是真文章，直接锁定为 article，省成本
+_LLM_MAX_FLAGS = 3          # 连续被判非文章的上限，达到后不再重复分析
+
+
+def analyze_article_llm(article_id: int) -> dict:
+    """三层漏斗第 3 层：正文级 LLM 语义判定（异步后台调用）。
+
+    仅在「过滤开关开启 且 已配置模型」时生效，返回 {skipped|verdict|error}。
+    防重复分析：
+      - llm_checked=True（已判为真文章）→ 永不再判；
+      - llm_flag_count>=3（连续判非文章）→ 停判；
+      - 正文过短（<200 字）→ 交确定性层，不调 LLM；
+      - 正文足够长（>800 字）→ 直接锁定为真文章，省成本。
+    命中非文章置 is_flagged=True，从列表/搜索隐藏但不删除数据，可人工复核。
+    fail-safe：LLM 判不了（None）时不改任何状态，下次仍可再试。
+    """
+    from backend import llm  # 延迟导入，避免模块级循环依赖
+
+    if not llm.is_filter_enabled() or not llm.is_configured():
+        return {"skipped": "filter disabled or llm not configured"}
+
+    with Session(engine) as s:
+        a = s.get(Article, article_id)
+        if not a:
+            return {"skipped": "article not found"}
+        if a.llm_checked:
+            return {"skipped": "already confirmed article"}
+        if a.llm_flag_count >= _LLM_MAX_FLAGS:
+            return {"skipped": "reached max flags"}
+        title = a.title or ""
+        html = a.content or a.summary or ""
+
+    plain = re.sub(r"<[^>]+>", "", html).strip()
+    plen = len(plain)
+    if plen < _LLM_MIN_LEN:
+        # 太短，属确定性层管辖范围，LLM 不介入
+        return {"skipped": f"too short ({plen})"}
+    if plen > _LLM_MAX_LEN:
+        # 足够长基本必是真文章，锁定，之后不再判
+        with Session(engine) as s:
+            a = s.get(Article, article_id)
+            if a and not a.llm_checked:
+                a.llm_checked = True
+                s.add(a); s.commit()
+        return {"verdict": "article", "reason": f"long content ({plen})"}
+
+    verdict = llm.classify_article(title, plain)
+    if verdict is None:
+        return {"error": "llm undecided, kept"}  # fail-safe：不改状态
+
+    with Session(engine) as s:
+        a = s.get(Article, article_id)
+        if not a:
+            return {"skipped": "article gone"}
+        if verdict is True:
+            a.llm_checked = True          # 确认真文章，永久锁定
+            a.is_flagged = False
+            s.add(a); s.commit()
+            return {"verdict": "article"}
+        # verdict is False：判为非文章，累计计数；达上限才真正标记
+        a.llm_flag_count += 1
+        if a.llm_flag_count >= _LLM_MAX_FLAGS:
+            a.is_flagged = True
+        s.add(a); s.commit()
+        return {"verdict": "non_article", "flag_count": a.llm_flag_count,
+                "flagged": a.is_flagged}
+
 
 def fetch_full_content(article_id: int) -> dict:
     """按需抓取单篇文章全文。返回 {ok, updated, content_len, reason?}。
@@ -501,6 +609,16 @@ def fetch_full_content(article_id: int) -> dict:
         except Exception as e:
             extracted = None
 
+        # 正文级二次校验（零成本，不调 LLM）：sitemap 回填只按 URL 建占位，
+        # 真正抓下来才知道是不是文章。命中强信号（重定向占位页）则删除该占位，
+        # 顺带清 FTS 索引（article 的删除触发器会同步）。空正文等弱信号不删，
+        # 仍走下方降级链保留已有 summary，避免误伤 trafilatura 提取失败的真文章。
+        reason = _looks_like_non_article(html, extracted)
+        if reason in ("meta refresh redirect", "redirect stub"):
+            session.delete(art)
+            session.commit()
+            return {"ok": True, "deleted": True, "reason": reason, "content_len": 0}
+
         if extracted and len(extracted) > len(art.content or ""):
             extracted = _normalize_extracted_html(extracted, art.link, source_html=html)
             art.content = extracted
@@ -511,3 +629,45 @@ def fetch_full_content(article_id: int) -> dict:
         session.add(art)
         session.commit()
         return {"ok": True, "updated": updated, "content_len": len(art.content or "")}
+
+
+def process_new_articles_llm(article_ids: list[int]) -> dict:
+    """刷新后台钩子：对本次刷新「新增」的文章跑正文级 LLM 过滤。
+
+    设计要点：
+      - 只处理本次新增的文章（数量天然小），绝不全表扫描，避免成本爆炸；
+      - 开关关闭或未配置模型时整体短路，一次网络/LLM 都不发；
+      - 逐篇先 fetch_full_content 抓正文（RSS entry 的 content 常为空/摘要，
+        LLM 判不了），再 analyze_article_llm 判定；
+      - 单篇异常隔离，不影响其余文章；
+      - analyze_article_llm 内含状态机（已确认/达标记上限/长度分流），
+        天然幂等，重复刷新不会重复烧钱。
+    """
+    from backend import llm  # 延迟导入，避免模块级循环依赖
+
+    result = {"total": len(article_ids), "checked": 0, "flagged": 0,
+              "confirmed": 0, "skipped": 0, "errors": 0}
+    if not article_ids:
+        return result
+    if not llm.is_filter_enabled() or not llm.is_configured():
+        result["skipped"] = len(article_ids)
+        return result
+
+    for aid in article_ids:
+        try:
+            # 抓正文（幂等）。若命中重定向占位页会在此被删除，跳过后续判定。
+            fc = fetch_full_content(aid)
+            if fc.get("deleted"):
+                result["flagged"] += 1
+                continue
+            verdict = analyze_article_llm(aid)
+            result["checked"] += 1
+            if verdict.get("verdict") == "non_article" and verdict.get("flagged"):
+                result["flagged"] += 1
+            elif verdict.get("verdict") == "article":
+                result["confirmed"] += 1
+            elif "skipped" in verdict:
+                result["skipped"] += 1
+        except Exception:  # noqa: BLE001 单篇失败隔离，继续处理其余
+            result["errors"] += 1
+    return result

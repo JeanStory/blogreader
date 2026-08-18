@@ -497,6 +497,13 @@
         <label>模型</label>
         <input v-model="settings.model"
                :placeholder="settings.api_type==='anthropic' ? 'claude-3-5-sonnet-latest' : 'gpt-4o-mini'" />
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer">
+          <input type="checkbox" v-model="settings.filter_enabled" style="width:auto;margin:0" />
+          <span>用 LLM 过滤非文章内容</span>
+        </label>
+        <p class="modal-hint" style="margin-top:4px">
+          开启后，打开或刷新文章时会在后台用上面配置的模型判断该页是否为正文文章。被判为非文章的将从列表中隐藏（数据保留在库中，不会删除）。仅在已配置模型时生效。
+        </p>
         <div class="modal-msg" v-if="settingsMsg" :class="settingsMsgOk ? 'ok' : 'err'">{{ settingsMsg }}</div>
         <div class="modal-actions">
           <button class="btn ghost" @click="testSettings" :disabled="savingSettings">
@@ -540,7 +547,7 @@
           // 设置弹窗
           showSettings: false, savingSettings: false,
           settingsMsg: '', settingsMsgOk: false,
-          settings: { api_type: 'openai', base_url: '', api_key: '', model: '', has_key: false },
+          settings: { api_type: 'openai', base_url: '', api_key: '', model: '', has_key: false, filter_enabled: false },
           // AI 对话（多会话，落库持久化）
           chatOpen: false, chatMessages: [], chatInput: '', chatSelection: '',
           chatLoading: false, streaming: false,
@@ -828,7 +835,7 @@
           this.settingsMsg = '';
           try {
             const s = await this.api('/settings');
-            this.settings = { api_type: s.api_type, base_url: s.base_url, api_key: '', model: s.model, has_key: s.has_key };
+            this.settings = { api_type: s.api_type, base_url: s.base_url, api_key: '', model: s.model, has_key: s.has_key, filter_enabled: !!s.filter_enabled };
           } catch (e) { this.showToast('读取设置失败：' + e.message); }
           this.showSettings = true;
         },
@@ -838,6 +845,7 @@
             base_url: this.settings.base_url.trim(),
             api_key: this.settings.api_key,   // 留空表示不改
             model: this.settings.model.trim(),
+            filter_enabled: this.settings.filter_enabled,
           });
         },
         async saveSettings() {

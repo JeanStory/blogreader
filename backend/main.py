@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -101,6 +101,7 @@ class SettingsReq(BaseModel):
     base_url: str = ""
     api_key: str = ""       # 留空表示不修改已存的密钥
     model: str = ""
+    filter_enabled: Optional[bool] = None   # LLM 非文章过滤开关；None 表示不修改
 
 
 class TranslateReq(BaseModel):
@@ -258,12 +259,16 @@ def delete_feed(feed_id: int):
 
 
 @app.post("/api/feeds/{feed_id}/refresh")
-def refresh_feed(feed_id: int):
+def refresh_feed(feed_id: int, background_tasks: BackgroundTasks):
     with Session(engine) as s:
         f = s.get(Feed, feed_id)
         if not f:
             raise HTTPException(404, "订阅源不存在")
         stat = feed_service.fetch_feed(f, s)
+        # 对本次新增文章做后台正文级 LLM 过滤（开关关闭时函数内部会短路）。
+        new_ids = stat.get("new_ids") or []
+        if new_ids:
+            background_tasks.add_task(feed_service.process_new_articles_llm, new_ids)
         return stat
 
 
@@ -275,6 +280,8 @@ def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int
         q = select(Article)
         if feed_id is not None:
             q = q.where(Article.feed_id == feed_id)
+        # 正常列表：排除被隐藏（LLM 判为疑似非文章）的文章。
+        q = q.where(Article.is_flagged == False)  # noqa: E712
         if filter == "unread":
             q = q.where(Article.is_read == False)  # noqa: E712
         elif filter == "starred":
@@ -293,7 +300,7 @@ def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int
             "id": a.id, "feed_id": a.feed_id, "feed_title": feed_titles.get(a.feed_id, ""),
             "title": a.title, "link": a.link, "author": a.author,
             "summary": a.summary, "published_at": a.published_at.isoformat() if a.published_at else None,
-            "is_read": a.is_read, "is_starred": a.is_starred,
+            "is_read": a.is_read, "is_starred": a.is_starred, "is_flagged": a.is_flagged,
         } for a in arts]
 
 
@@ -316,7 +323,7 @@ def search_articles(q: str, feed_id: Optional[int] = None, limit: int = 100):
             phrase = '"' + kw.replace('"', '""') + '"'
             sql = (
                 "SELECT a.id FROM article_fts f JOIN article a ON a.id = f.rowid "
-                "WHERE article_fts MATCH :kw"
+                "WHERE article_fts MATCH :kw AND a.is_flagged = 0"
             )
             params = {"kw": phrase}
             if feed_id is not None:
@@ -341,6 +348,8 @@ def search_articles(q: str, feed_id: Optional[int] = None, limit: int = 100):
             )
             if feed_id is not None:
                 query = query.where(Article.feed_id == feed_id)
+            # 被 LLM 判为疑似非文章的不出现在搜索结果里。
+            query = query.where(Article.is_flagged == False)  # noqa: E712
             query = query.order_by(Article.published_at.desc().nullslast()).limit(limit)
             arts = s.exec(query).all()
         fids = {a.feed_id for a in arts}
@@ -375,19 +384,22 @@ def search_articles(q: str, feed_id: Optional[int] = None, limit: int = 100):
             "id": a.id, "feed_id": a.feed_id, "feed_title": feed_titles.get(a.feed_id, ""),
             "title": a.title, "link": a.link, "author": a.author,
             "summary": a.summary, "published_at": a.published_at.isoformat() if a.published_at else None,
-            "is_read": a.is_read, "is_starred": a.is_starred,
+            "is_read": a.is_read, "is_starred": a.is_starred, "is_flagged": a.is_flagged,
             "snippet": make_snippet(a),
         } for a in arts]
 
 
 @app.get("/api/articles/{article_id}")
-def get_article(article_id: int):
+def get_article(article_id: int, background_tasks: BackgroundTasks):
     # 按需抓全文：RSS 常只给摘要，首次点开时抓原文页提取正文并缓存
     with Session(engine) as s:
         exists = s.get(Article, article_id)
         if not exists:
             raise HTTPException(404, "文章不存在")
     feed_service.fetch_full_content(article_id)
+    # 三层漏斗第 3 层：正文抓好后异步做 LLM 语义判定，不阻塞正文返回。
+    # analyze_article_llm 内部自带开关/配置/防重复判定的门控，未开启时直接跳过。
+    background_tasks.add_task(feed_service.analyze_article_llm, article_id)
     with Session(engine) as s:
         a = s.get(Article, article_id)
         if not a:
@@ -396,7 +408,7 @@ def get_article(article_id: int):
             "id": a.id, "feed_id": a.feed_id, "title": a.title, "link": a.link,
             "author": a.author, "content": a.content or a.summary,
             "published_at": a.published_at.isoformat() if a.published_at else None,
-            "is_read": a.is_read, "is_starred": a.is_starred,
+            "is_read": a.is_read, "is_starred": a.is_starred, "is_flagged": a.is_flagged,
         }
 
 
@@ -422,9 +434,14 @@ def _update_flag(article_id: int, field: str, value: bool):
 
 
 @app.post("/api/refresh")
-def refresh_all():
+def refresh_all(background_tasks: BackgroundTasks):
     """手动刷新所有订阅源。"""
-    return feed_service.refresh_all()
+    result = feed_service.refresh_all()
+    # 汇总各 feed 本次新增文章 id，后台统一做正文级 LLM 过滤。
+    new_ids = [aid for d in result.get("details", []) for aid in (d.get("new_ids") or [])]
+    if new_ids:
+        background_tasks.add_task(feed_service.process_new_articles_llm, new_ids)
+    return result
 
 
 # ---------- 翻译设置 & 翻译 ----------
@@ -436,6 +453,8 @@ def _masked_settings() -> dict:
         "base_url": cfg.get("base_url") or "",
         "model": cfg.get("model") or "",
         "has_key": bool(cfg.get("api_key")),
+        "filter_enabled": llm.is_filter_enabled(),
+        "filter_available": llm.is_configured(cfg),
     }
 
 
@@ -446,7 +465,10 @@ def get_settings():
 
 @app.post("/api/settings")
 def save_settings(req: SettingsReq):
-    llm.save_config(req.model_dump())
+    data = req.model_dump()
+    llm.save_config(data)
+    if data.get("filter_enabled") is not None:
+        llm.set_filter_enabled(bool(data["filter_enabled"]))
     return _masked_settings()
 
 

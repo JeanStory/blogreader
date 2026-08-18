@@ -56,6 +56,11 @@ _MIGRATIONS = {
         ("backfill_done", "BOOLEAN DEFAULT 0"),
         ("backfill_total", "INTEGER DEFAULT 0"),
     ],
+    "article": [
+        ("llm_checked", "BOOLEAN DEFAULT 0"),
+        ("llm_flag_count", "INTEGER DEFAULT 0"),
+        ("is_flagged", "BOOLEAN DEFAULT 0"),
+    ],
 }
 
 
