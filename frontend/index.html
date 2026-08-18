@@ -272,6 +272,31 @@
       /* 对话面板底部安全区，防止输入栏被系统手势条遮挡 */
       .chat-input { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
     }
+
+    /* 文章列表项右键菜单 */
+    .ctx-menu {
+      position: fixed;
+      z-index: 9999;
+      min-width: 176px;
+      background: var(--panel, #fff);
+      border: 1px solid var(--border, #e2e2e2);
+      border-radius: 8px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.16);
+      padding: 4px;
+      user-select: none;
+      font-size: 14px;
+    }
+    .ctx-menu .ctx-item {
+      padding: 8px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      color: var(--text, #222);
+      white-space: nowrap;
+    }
+    .ctx-menu .ctx-item:hover { background: var(--hover, #f0f0f0); }
+    .ctx-menu .ctx-item.danger { color: #d14545; }
+    .ctx-menu .ctx-item.danger:hover { background: #fbeaea; }
+    .ctx-menu .ctx-sep { height: 1px; margin: 4px 6px; background: var(--border, #e2e2e2); }
   </style>
 </head>
 <body>
@@ -325,6 +350,9 @@
         <div class="feed-item" :class="{ active: starredView }" @click="selectStarred()">
           <div class="feed-left"><div class="fi-title">★ 收藏</div></div>
         </div>
+        <div class="feed-item" :class="{ active: hiddenView }" @click="selectHidden()">
+          <div class="feed-left"><div class="fi-title">🗂 隐藏夹</div></div>
+        </div>
         <div v-for="f in feeds" :key="f.id" class="feed-item" :class="{ active: selectedFeed === f.id }" @click="selectFeed(f.id)">
           <div class="feed-left">
             <div class="fi-title">{{ f.title }}</div>
@@ -364,7 +392,8 @@
       <div class="scroll">
         <div v-for="a in articles" :key="a.id" class="art-item"
              :class="{ active: current && current.id === a.id, unread: !a.is_read, read: a.is_read }"
-             @click="openArticle(a)">
+             @click="openArticle(a)"
+             @contextmenu.prevent="openCtxMenu($event, a)">
           <div class="ai-title">
             <span>{{ a.title }}</span>
             <button class="star-btn star" :class="{ on: a.is_starred }" @click.stop="toggleStar(a)">★</button>
@@ -375,9 +404,20 @@
             <span>{{ fmtDate(a.published_at) }}</span>
           </div>
         </div>
-        <div class="empty" v-if="articles.length === 0 && !loadingList">{{ searchActive ? '没有匹配的文章。' : (starredView ? '还没有收藏的文章。点击文章标题旁的 ★ 收藏。' : '没有文章。') }}</div>
+        <div class="empty" v-if="articles.length === 0 && !loadingList">{{ searchActive ? '没有匹配的文章。' : (starredView ? '还没有收藏的文章。点击文章标题旁的 ★ 收藏。' : (hiddenView ? '隐藏夹是空的。在文章上点右键即可隐藏。' : '没有文章。')) }}</div>
         <div class="empty" v-if="loadingList"><span class="spin"></span> 加载中</div>
       </div>
+    </div>
+
+    <!-- 文章列表项右键菜单 -->
+    <div class="ctx-menu" v-if="ctxMenu.show" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }" @click.stop>
+      <div class="ctx-item" @click="ctxToggleRead()">{{ ctxMenu.art && ctxMenu.art.is_read ? '标为未读' : '标为已读' }}</div>
+      <div class="ctx-item" @click="ctxToggleStar()">{{ ctxMenu.art && ctxMenu.art.is_starred ? '取消星标' : '加星标' }}</div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item" @click="ctxOpenLink()">在新标签打开原文</div>
+      <div class="ctx-item" @click="ctxCopyLink()">复制文章链接</div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item danger" @click="ctxToggleHide()">{{ hiddenView ? '移出隐藏夹' : '隐藏此文' }}</div>
     </div>
 
     <!-- 分隔条：拖拽调节文章列表宽度（双击复位） -->
@@ -553,12 +593,15 @@
           chatLoading: false, streaming: false,
           conversations: [], currentConvId: null, loadingConvs: false,
           selFab: { show: false, x: 0, y: 0, text: '' },
+          hiddenView: false,
+          ctxMenu: { show: false, x: 0, y: 0, art: null },
         };
       },
       computed: {
         totalUnread() { return this.feeds.reduce((s, f) => s + (f.unread || 0), 0); },
         currentFeedTitle() {
           if (this.starredView) return '★ 收藏';
+          if (this.hiddenView) return '🗂 隐藏夹';
           if (this.selectedFeed === null) return '全部文章';
           const f = this.feeds.find(x => x.id === this.selectedFeed);
           return f ? f.title : '文章';
@@ -694,7 +737,9 @@
           this.loadingList = true;
           try {
             let q;
-            if (this.starredView) {
+            if (this.hiddenView) {
+              q = '?hidden=true&limit=500';
+            } else if (this.starredView) {
               q = '?filter=starred&limit=500';
             } else {
               q = '?filter=' + this.filter + '&limit=200';
@@ -704,8 +749,9 @@
           } catch (e) { this.showToast('加载文章失败：' + e.message); }
           finally { this.loadingList = false; }
         },
-        selectFeed(id) { this.starredView = false; this._resetSearch(); this.selectedFeed = id; this.mobilePane = 'list'; this.loadArticles(); },
-        selectStarred() { this.starredView = true; this._resetSearch(); this.selectedFeed = null; this.mobilePane = 'list'; this.loadArticles(); },
+        selectFeed(id) { this.starredView = false; this.hiddenView = false; this._resetSearch(); this.selectedFeed = id; this.mobilePane = 'list'; this.loadArticles(); },
+        selectStarred() { this.starredView = true; this.hiddenView = false; this._resetSearch(); this.selectedFeed = null; this.mobilePane = 'list'; this.loadArticles(); },
+        selectHidden() { this.hiddenView = true; this.starredView = false; this._resetSearch(); this.selectedFeed = null; this.mobilePane = 'list'; this.loadArticles(); },
         setFilter(f) { this.filter = f; this.loadArticles(); },
         _resetSearch() { this.searchQuery = ''; this.searchActive = false; },
         async doSearch() {
@@ -823,6 +869,62 @@
             if (inList) inList.is_starred = val;
             if (this.current && this.current.id === a.id) this.current.is_starred = val;
             if (this.filter === 'starred') this.loadArticles();
+          } catch (e) { this.showToast('操作失败：' + e.message); }
+        },
+        // ===== 列表项右键菜单 =====
+        openCtxMenu(ev, a) {
+          // 菜单尺寸约 180x220，靠近视口边缘时向内收，避免溢出
+          const mw = 190, mh = 230;
+          let x = ev.clientX, y = ev.clientY;
+          if (x + mw > window.innerWidth) x = window.innerWidth - mw - 4;
+          if (y + mh > window.innerHeight) y = window.innerHeight - mh - 4;
+          this.ctxMenu = { show: true, x: Math.max(4, x), y: Math.max(4, y), art: a };
+        },
+        closeCtxMenu() { this.ctxMenu.show = false; this.ctxMenu.art = null; },
+        ctxToggleRead() {
+          const a = this.ctxMenu.art; if (a) this.markRead(a, !a.is_read);
+          this.closeCtxMenu();
+        },
+        ctxToggleStar() {
+          const a = this.ctxMenu.art; if (a) this.toggleStar(a);
+          this.closeCtxMenu();
+        },
+        ctxOpenLink() {
+          const a = this.ctxMenu.art;
+          if (a && a.link) window.open(a.link, '_blank', 'noopener');
+          this.closeCtxMenu();
+        },
+        async ctxCopyLink() {
+          const a = this.ctxMenu.art;
+          if (a && a.link) {
+            try {
+              await navigator.clipboard.writeText(a.link);
+              this.showToast('链接已复制');
+            } catch (e) {
+              // clipboard API 在非 https 或无权限时失败，降级到临时 textarea
+              const ta = document.createElement('textarea');
+              ta.value = a.link; document.body.appendChild(ta); ta.select();
+              try { document.execCommand('copy'); this.showToast('链接已复制'); }
+              catch (_) { this.showToast('复制失败'); }
+              document.body.removeChild(ta);
+            }
+          }
+          this.closeCtxMenu();
+        },
+        async ctxToggleHide() {
+          const a = this.ctxMenu.art;
+          this.closeCtxMenu();
+          if (!a) return;
+          const val = !a.is_flagged;  // 隐藏夹里 is_flagged 为 true，操作即“移出”
+          try {
+            await this.api('/articles/' + a.id + '/hide', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_flagged: val }),
+            });
+            // 无论隐藏还是移出，该文章都应从当前列表消失
+            this.articles = this.articles.filter(x => x.id !== a.id);
+            if (this.current && this.current.id === a.id) this.current = null;
+            this.showToast(val ? '已移入隐藏夹' : '已移出隐藏夹');
           } catch (e) { this.showToast('操作失败：' + e.message); }
         },
         patchFeedUnread(feedId, delta) {
@@ -1329,7 +1431,13 @@
         document.addEventListener('mousedown', (e) => {
           if (e.target.closest && e.target.closest('.chat-fab')) return;
           this.selFab.show = false;
+          // 点击菜单以外的区域关闭右键菜单
+          if (this.ctxMenu.show && !(e.target.closest && e.target.closest('.ctx-menu'))) {
+            this.closeCtxMenu();
+          }
         });
+        // Esc 关闭右键菜单；滚动时也关闭，避免菜单悬浮错位
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeCtxMenu(); });
       },
     }).mount('#app');
   </script>

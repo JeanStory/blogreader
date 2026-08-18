@@ -96,6 +96,10 @@ class StarReq(BaseModel):
     is_starred: bool = True
 
 
+class HideReq(BaseModel):
+    is_flagged: bool = True
+
+
 class SettingsReq(BaseModel):
     api_type: str = "openai"
     base_url: str = ""
@@ -274,14 +278,22 @@ def refresh_feed(feed_id: int, background_tasks: BackgroundTasks):
 
 # ---------- 文章 ----------
 @app.get("/api/articles")
-def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int = 100, offset: int = 0):
-    """文章列表。filter: all|unread|starred。按发布时间倒序。"""
+def list_articles(feed_id: Optional[int] = None, filter: str = "all", limit: int = 100, offset: int = 0, hidden: bool = False):
+    """文章列表。filter: all|unread|starred。按发布时间倒序。
+
+    hidden=True 时进入“隐藏夹”视图，只返回被隐藏(is_flagged)的文章；
+    否则正常列表排除被隐藏的文章。
+    """
     with Session(engine) as s:
         q = select(Article)
         if feed_id is not None:
             q = q.where(Article.feed_id == feed_id)
-        # 正常列表：排除被隐藏（LLM 判为疑似非文章）的文章。
-        q = q.where(Article.is_flagged == False)  # noqa: E712
+        if hidden:
+            # 隐藏夹：只看被隐藏（手动隐藏或 LLM 判为疑似非文章）的文章。
+            q = q.where(Article.is_flagged == True)  # noqa: E712
+        else:
+            # 正常列表：排除被隐藏的文章，不展示给用户。
+            q = q.where(Article.is_flagged == False)  # noqa: E712
         if filter == "unread":
             q = q.where(Article.is_read == False)  # noqa: E712
         elif filter == "starred":
@@ -420,6 +432,12 @@ def set_read(article_id: int, req: ReadReq):
 @app.post("/api/articles/{article_id}/star")
 def set_star(article_id: int, req: StarReq):
     return _update_flag(article_id, "is_starred", req.is_starred)
+
+
+@app.post("/api/articles/{article_id}/hide")
+def set_hide(article_id: int, req: HideReq):
+    """手动隐藏/取消隐藏文章。隐藏后从正常列表消失，进入隐藏夹。"""
+    return _update_flag(article_id, "is_flagged", req.is_flagged)
 
 
 def _update_flag(article_id: int, field: str, value: bool):
